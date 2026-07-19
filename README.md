@@ -388,7 +388,9 @@ IdentityOS is an open standard. Contributions welcome.
 - **Adapters**: Add support for new LLM providers  
 - **Documentation**: Improve examples, tutorials, guides
 
----
+| Module | Description |
+|---|---|
+| `identity_object.py` | High-level developer API for creating/managing identities |
 
 ## License
 
@@ -396,7 +398,7 @@ MIT License — see [LICENSE](LICENSE) for details.
 
 The Open Identity Specification is free to implement. No licensing fees.
 
----
+## Testing
 
 ## Acknowledgments
 
@@ -420,7 +422,14 @@ OIS v1.0 is in draft. Early adopters are encouraged. Breaking changes are possib
 **Q: Who controls the spec?**  
 The community. Proposed governance: **Open Identity Foundation** (to be established).
 
----
+1. **Resolve** — load identity spec
+2. **Input Policy** — gate input content
+3. **Compose Context** — assemble identity + memory + skills + goals
+4. **Adapter** — invoke LLM (via pluggable adapter)
+5. **Output Policy** — gate output content
+6. **Evaluate** — score quality, detect memorable content
+7. **Store** — persist interaction in memory
+8. **Respond** — return result to caller
 
 ## Learn More
 

@@ -1,45 +1,64 @@
-"""Identity Runtime - Core FastAPI Service
+"""Identity Runtime — Unified FastAPI Service
 
-The identity layer that sits between users/developers and any LLM.
-Loads identity specs, manages memories, assembles context.
+Routes all interactions through the IdentityRuntime orchestrator,
+which runs the full pipeline: policy → context → LLM → evaluate → store.
 """
 
+import json
+import logging
+import os
+from typing import Any, List, Optional
+
+import uvicorn
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from typing import Optional, List
-import uvicorn
-import logging
 
-from identity_loader import IdentityLoader
-from memory_engine import MemoryEngine
-from context_builder import ContextBuilder
-from eval_engine import EvalEngine
+from core.evaluation import register_default_criteria
+from runtime.orchestrator import IdentityRuntime, InteractionRequest, InteractionResponse
+from runtime.persistence import JSONFileBackend
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 app = FastAPI(
     title="Identity Runtime API",
-    description="Portable AI identity layer - own your AI's soul, not just its prompt.",
-    version="1.0.0"
+    description="Portable AI identity layer — own your AI's soul, not just its prompt.",
+    version="2.0.0",
 )
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # In prod: restrict to your extension/SDK origins
+    allow_origins=["*"],
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# Initialize core components
-identity_loader = IdentityLoader()
-memory_engine = MemoryEngine()
-context_builder = ContextBuilder(memory_engine, identity_loader)
-eval_engine = EvalEngine(memory_engine)
+# Initialize the runtime orchestrator with persistence and optional adapter
+storage = JSONFileBackend(root_dir=".identity_store")
+
+adapter_type = os.environ.get("IDENTITY_ADAPTER", "")
+adapter = None
+if adapter_type:
+    try:
+        from adapters import get_adapter
+        adapter_config: dict[str, Any] = {}
+        adapter_config_str = os.environ.get("IDENTITY_ADAPTER_CONFIG", "{}")
+        if adapter_config_str:
+            adapter_config = json.loads(adapter_config_str)
+        adapter = get_adapter(adapter_type, **adapter_config)
+        logger.info(f"Using adapter: {adapter_type} (model={adapter_config.get('model', 'default')})")
+    except Exception as e:
+        logger.warning(f"Failed to initialize adapter '{adapter_type}': {e}")
+
+runtime = IdentityRuntime(storage=storage, adapter=adapter)
+register_default_criteria(runtime.evaluation_engine)
+loaded = runtime.load_persisted()
+if loaded:
+    logger.info(f"Loaded {loaded} persisted identity/ies from .identity_store/")
 
 
-# --- Request/Response Models ---
+# --- Request / Response Models ---
 
 class ContextRequest(BaseModel):
     message: str
@@ -71,6 +90,19 @@ class MemoriesResponse(BaseModel):
     memories: List[dict]
     total: int
 
+class ProcessRequest(BaseModel):
+    message: str
+    identity_id: str
+    user_id: str
+    session_id: Optional[str] = None
+
+class ProcessResponse(BaseModel):
+    output: str
+    identity_id: str
+    session_id: str
+    policy_passed: bool
+    eval_score: Optional[float] = None
+
 
 # --- Endpoints ---
 
@@ -78,9 +110,9 @@ class MemoriesResponse(BaseModel):
 def root():
     return {
         "service": "Identity Runtime",
-        "version": "1.0.0",
+        "version": "2.0.0",
         "status": "running",
-        "tagline": "Every AI deserves its own soul."
+        "tagline": "Every AI deserves its own soul.",
     }
 
 
@@ -89,116 +121,146 @@ def health():
     return {"status": "ok"}
 
 
+@app.post("/process", response_model=ProcessResponse)
+async def process(req: ProcessRequest):
+    """
+    Full pipeline: resolve identity → policy check → compose context →
+    (adapter) → policy check → evaluate → store → respond.
+
+    Intended for SDK / agentic use where the caller wants the runtime
+    to manage the entire lifecycle.
+    """
+    session_id = req.session_id or runtime.start_session(req.identity_id)
+
+    request = InteractionRequest(
+        identity_id=req.identity_id,
+        user_input=req.message,
+        session_id=session_id,
+    )
+
+    result: InteractionResponse = runtime.process(request)
+
+    if not result.policy_passed and "not found" in result.output.lower():
+        raise HTTPException(status_code=404, detail=result.output)
+
+    return ProcessResponse(
+        output=result.output,
+        identity_id=result.identity_id,
+        session_id=session_id,
+        policy_passed=result.policy_passed,
+        eval_score=result.eval_score,
+    )
+
+
 @app.post("/context", response_model=ContextResponse)
 async def get_context(req: ContextRequest):
     """
-    Assemble identity context before sending a message to an LLM.
-    
-    1. Load identity spec
-    2. Retrieve relevant memories
-    3. Assemble augmented context string
-    Returns: context string to prepend to user's message
+    Compose identity context (without invoking an LLM).
+    Useful when the caller manages their own LLM call externally.
     """
-    try:
-        identity = identity_loader.load(req.identity_id)
-        if not identity:
-            raise HTTPException(status_code=404, detail=f"Identity '{req.identity_id}' not found")
-        
-        session_id = req.session_id or f"{req.user_id}_{req.identity_id}"
-        
-        result = await context_builder.build(
-            message=req.message,
-            identity=identity,
-            user_id=req.user_id,
-            session_id=session_id
-        )
-        
-        logger.info(f"Context built for identity={req.identity_id} user={req.user_id} memories={result['memories_used']}")
-        
-        return ContextResponse(
-            augmented_context=result["context"],
-            identity_name=identity["identity"]["name"],
-            memories_used=result["memories_used"],
-            session_id=session_id
-        )
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Context build error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+    identity = runtime.load(req.identity_id)
+    if not identity:
+        raise HTTPException(status_code=404, detail=f"Identity '{req.identity_id}' not found")
+
+    session_id = req.session_id or f"{req.user_id}_{req.identity_id}"
+    ctx = runtime.context_composer.compose(
+        identity=identity,
+        memory_store=runtime.memory_store,
+        skill_registry=runtime.skill_registry,
+        goal_engine=runtime.goal_engine,
+        identity_graph=runtime.identity_graph,
+        query=req.message,
+    )
+
+    memories_used = ctx.memory_block.count("\n  [") if ctx.memory_block else 0
+
+    logger.info(f"Context built for identity={req.identity_id} user={req.user_id} memories={memories_used}")
+
+    return ContextResponse(
+        augmented_context=ctx.render(),
+        identity_name=identity.name,
+        memories_used=memories_used,
+        session_id=session_id,
+    )
 
 
 @app.post("/evaluate", response_model=EvaluateResponse)
 async def evaluate(req: EvaluateRequest):
     """
-    Evaluate an exchange and decide what to store as memory.
-    
-    Called after every LLM response.
-    The eval engine determines:
-    - Was a preference revealed?
-    - Was a correction made?
-    - Is there a milestone or decision worth remembering?
+    Evaluate an exchange (user message + LLM response) and decide
+    what's worth remembering. Called after every LLM response.
+
+    Uses the same classification and storage pipeline as process()
+    via IdentityRuntime._extract_and_store_semantic_memory().
     """
-    try:
-        identity = identity_loader.load(req.identity_id)
-        if not identity:
-            raise HTTPException(status_code=404, detail=f"Identity '{req.identity_id}' not found")
-        
-        session_id = req.session_id or f"{req.user_id}_{req.identity_id}"
-        
-        result = await eval_engine.evaluate(
-            message=req.message,
-            response=req.response,
-            identity=identity,
-            user_id=req.user_id,
-            session_id=session_id
-        )
-        
-        logger.info(f"Eval complete identity={req.identity_id} stored={result['memories_stored']}")
-        
+    identity = runtime.load(req.identity_id)
+    if not identity:
+        raise HTTPException(status_code=404, detail=f"Identity '{req.identity_id}' not found")
+
+    session_id = req.session_id or f"{req.user_id}_{req.identity_id}"
+
+    report = runtime.evaluation_engine.evaluate(
+        identity_id=req.identity_id,
+        interaction_id=session_id,
+        input_data=req.message,
+        output_data=req.response,
+    )
+
+    stored = runtime._extract_and_store_semantic_memory(
+        user_input=req.message,
+        output=req.response,
+        identity_id=req.identity_id,
+        session_id=session_id,
+    )
+
+    if stored:
+        mem_type = stored.tags[-1] if len(stored.tags) > 1 else "general"
+        logger.info(f"Stored {mem_type} memory for {req.identity_id}: {req.message[:60]}")
         return EvaluateResponse(
-            memories_stored=result["memories_stored"],
-            summary=result["summary"],
-            tags=result["tags"]
+            memories_stored=1,
+            summary=f"Stored {mem_type}: {req.message[:100]}",
+            tags=[mem_type],
         )
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Eval error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+
+    return EvaluateResponse(
+        memories_stored=0,
+        summary=f"Not memorable (score={report.overall_score:.2f})",
+        tags=[],
+    )
 
 
 @app.get("/identity/{identity_id}")
 def get_identity(identity_id: str):
     """Get a loaded identity spec by ID."""
-    identity = identity_loader.load(identity_id)
+    identity = runtime.load(identity_id)
     if not identity:
         raise HTTPException(status_code=404, detail=f"Identity '{identity_id}' not found")
-    return identity
+    return identity.to_dict()
 
 
 @app.get("/identity")
 def list_identities():
-    """List all available identity specs."""
-    return {"identities": identity_loader.list_all()}
+    """List all available identity IDs."""
+    specs = runtime.list_identities()
+    return {"identities": [s.id for s in specs]}
 
 
 @app.get("/memories/{user_id}/{identity_id}", response_model=MemoriesResponse)
 def get_memories(user_id: str, identity_id: str, limit: int = 50):
-    """Get stored memories for a user/identity pair."""
-    memories = memory_engine.get_all(user_id=user_id, identity_id=identity_id, limit=limit)
+    """Get stored memories for an identity."""
+    memories = runtime.memory_store.by_identity(identity_id=identity_id)[:limit]
     return MemoriesResponse(
         identity_id=identity_id,
         user_id=user_id,
-        memories=memories,
-        total=len(memories)
+        memories=[m.to_dict() for m in memories],
+        total=len(memories),
     )
 
 
 @app.delete("/memories/{user_id}/{identity_id}")
 def clear_memories(user_id: str, identity_id: str):
-    """Clear all memories for a user/identity pair."""
-    deleted = memory_engine.clear(user_id=user_id, identity_id=identity_id)
+    """Clear all memories for an identity."""
+    deleted = runtime.memory_store.clear_identity(identity_id)
     return {"deleted": deleted, "message": "Memories cleared."}
 
 

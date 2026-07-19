@@ -13,12 +13,10 @@ Design principle: Identity is the kernel. Everything else is a loadable module.
 from __future__ import annotations
 
 import hashlib
-import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Dict, List, Optional
-
 
 # ─── Enums ────────────────────────────────────────────────────────────────────
 
@@ -136,6 +134,12 @@ class IdentitySpec:
     tagline: str = ""               # One-line description
     origin_story: str = ""          # Backstory / formation context
 
+    # ── Persona & communication ─────────────────────────────────────────────
+    role: str = ""
+    persona: str = ""
+    communication_style: str = ""
+    system_prompt: str = ""
+
     # ── Behavioral bedrock ───────────────────────────────────────────────────
     core_values: List[CoreValue] = field(default_factory=list)
     traits: List[Trait] = field(default_factory=list)
@@ -201,9 +205,12 @@ class IdentitySpec:
         """
         major, minor, patch = map(int, self.version.split("."))
         if level == "major":
-            major += 1; minor = 0; patch = 0
+            major += 1
+            minor = 0
+            patch = 0
         elif level == "minor":
-            minor += 1; patch = 0
+            minor += 1
+            patch = 0
         else:
             patch += 1
         self.version = f"{major}.{minor}.{patch}"
@@ -226,7 +233,10 @@ class IdentitySpec:
         fork.version_history = []
         fork.status = IdentityStatus.ACTIVE
         # Record the branch origin in the fork's first snapshot
-        fork.snapshot(changelog=f"Branched from {self.id}@{self.version}. {changelog}", branch=branch_name)
+        fork.snapshot(
+            changelog=f"Branched from {self.id}@{self.version}. {changelog}",
+            branch=branch_name,
+        )
         return fork
 
     def get_trait(self, name: str) -> Optional[Trait]:
@@ -248,6 +258,10 @@ class IdentitySpec:
             "avatar": self.avatar,
             "tagline": self.tagline,
             "origin_story": self.origin_story,
+            "role": self.role,
+            "persona": self.persona,
+            "communication_style": self.communication_style,
+            "system_prompt": self.system_prompt,
             "core_values": [
                 {"name": cv.name, "description": cv.description, "strength": cv.strength}
                 for cv in self.core_values
@@ -294,9 +308,21 @@ class IdentitySpec:
             name=data["name"],
             identity_class=IdentityClass(data.get("identity_class", "agent")),
             version=data.get("version", "1.0.0"),
-            created_at=datetime.fromisoformat(data["created_at"]) if "created_at" in data else datetime.now(timezone.utc),
-            updated_at=datetime.fromisoformat(data["updated_at"]) if "updated_at" in data else datetime.now(timezone.utc),
+            created_at=(
+                datetime.fromisoformat(data["created_at"])
+                if "created_at" in data
+                else datetime.now(timezone.utc)
+            ),
+            updated_at=(
+                datetime.fromisoformat(data["updated_at"])
+                if "updated_at" in data
+                else datetime.now(timezone.utc)
+            ),
             status=IdentityStatus(data.get("status", "active")),
+            role=data.get("role", ""),
+            persona=data.get("persona", ""),
+            communication_style=data.get("communication_style", ""),
+            system_prompt=data.get("system_prompt", ""),
             avatar=data.get("avatar", "⬡"),
             tagline=data.get("tagline", ""),
             origin_story=data.get("origin_story", ""),
@@ -348,3 +374,32 @@ def create_identity(
         spec.traits = [Trait(**t) for t in traits]
     spec.snapshot(changelog="Initial creation")
     return spec
+
+
+# ─── Backward-compatible alias ──────────────────────────────────────────────
+
+Identity = IdentitySpec
+
+
+# ─── IdentityStore ────────────────────────────────────────────────────────────
+
+class IdentityStore:
+    """Simple in-memory store for Identity objects."""
+
+    def __init__(self) -> None:
+        self._identities: Dict[str, IdentitySpec] = {}
+
+    def save(self, identity: IdentitySpec) -> None:
+        self._identities[identity.id] = identity
+
+    def get(self, identity_id: str) -> Optional[IdentitySpec]:
+        return self._identities.get(identity_id)
+
+    def delete(self, identity_id: str) -> bool:
+        return bool(self._identities.pop(identity_id, None))
+
+    def list_all(self) -> List[IdentitySpec]:
+        return list(self._identities.values())
+
+    def __len__(self) -> int:
+        return len(self._identities)

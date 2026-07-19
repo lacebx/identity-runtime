@@ -1,9 +1,11 @@
 from __future__ import annotations
-from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional
-from enum import Enum
+
+import re
 import uuid
+from dataclasses import dataclass, field
 from datetime import datetime
+from enum import Enum
+from typing import Any, Callable, Dict, List, Optional
 
 
 class EvalDimension(Enum):
@@ -180,3 +182,125 @@ class EvaluationEngine:
 
     def __len__(self) -> int:
         return len(self._criteria)
+
+
+# ---------------------------------------------------------------------------
+# Heuristic Memory Classification (migrated from runtime/eval_engine.py)
+# ---------------------------------------------------------------------------
+# These functions provide concrete evaluation criteria for classifying
+# interactions by memory type (preference, decision, correction, milestone).
+# They are heuristic-based (regex pattern matching) and serve as the default
+# criterion set. Future versions should replace or augment with LLM-based
+# classification.
+# ---------------------------------------------------------------------------
+
+PREFERENCE_SIGNALS = [
+    r"i prefer", r"i like", r"i don't like", r"i hate",
+    r"i love", r"i enjoy", r"i always", r"i never",
+    r"my favorite", r"my favourite",
+    r"i tend to", r"i usually", r"i want", r"i need",
+    r"my style", r"my approach", r"i'm a", r"i am a",
+]
+
+DECISION_SIGNALS = [
+    r"let's go with", r"i'll go with", r"i've decided",
+    r"we're going with", r"i chose", r"i picked",
+    r"i'm going to", r"i'll use", r"final answer",
+]
+
+CORRECTION_SIGNALS = [
+    r"no, that's wrong", r"actually", r"that's not right",
+    r"you're wrong", r"incorrect", r"that's not what i meant",
+    r"i didn't say", r"please don't", r"stop doing",
+]
+
+MILESTONE_SIGNALS = [
+    r"i finished", r"i completed", r"i shipped", r"i launched",
+    r"i got the job", r"i passed", r"i graduated",
+    r"we hit", r"i published", r"first time",
+]
+
+
+def _matches_any(text: str, patterns: List[str]) -> bool:
+    text_lower = text.lower()
+    return any(re.search(p, text_lower) for p in patterns)
+
+
+def classify_memory_type(message: str, response: str) -> str:
+    """Classify what type of memory an exchange represents using heuristics."""
+    if _matches_any(message, CORRECTION_SIGNALS):
+        return "correction"
+    if _matches_any(message, MILESTONE_SIGNALS):
+        return "milestone"
+    if _matches_any(message, DECISION_SIGNALS):
+        return "decision"
+    if _matches_any(message, PREFERENCE_SIGNALS):
+        return "preference"
+    return "general"
+
+
+def compute_relevance(memory_type: str) -> float:
+    """Assign a base relevance score by memory type."""
+    scores = {
+        "correction": 1.5,
+        "preference": 1.3,
+        "milestone": 1.2,
+        "decision": 1.1,
+        "general": 0.8,
+    }
+    return scores.get(memory_type, 1.0)
+
+
+def is_worth_remembering(message: str, response: str) -> bool:
+    """Quick pre-filter: is this exchange even worth evaluating?"""
+    if len(message) < 15:
+        return False
+    simple_acks = {"ok", "okay", "thanks", "thank you", "got it", "sure", "yes", "no", "great"}
+    if message.lower().strip() in simple_acks:
+        return False
+    return True
+
+
+def heuristic_memory_scorer(input_data: Any, output_data: Any) -> float:
+    """
+    Default scorer: evaluate if an interaction contains memorable content.
+    Returns 1.0 if memorable (preference/decision/correction/milestone),
+    0.5 if general, 0.0 if not worth remembering.
+    """
+    message = input_data if isinstance(input_data, str) else str(input_data)
+    response = output_data if isinstance(output_data, str) else str(output_data)
+
+    if not is_worth_remembering(message, response):
+        return 0.0
+
+    mem_type = classify_memory_type(message, response)
+    relevance = compute_relevance(memory_type=mem_type)
+
+    # Normalize to [0, 1]
+    return min(1.0, relevance / 1.5)
+
+
+def register_default_criteria(engine: EvaluationEngine) -> None:
+    """
+    Register the default set of heuristic evaluation criteria.
+
+    This wires the heuristic memory classifier and other built-in
+    scorers into the engine so it produces meaningful evaluations
+    out of the box.
+    """
+    engine.add_criterion(EvalCriterion(
+        name="heuristic_memory_classifier",
+        dimension=EvalDimension.QUALITY,
+        description=(
+            "Heuristic detection of memorable content "
+            "(preferences, decisions, corrections, milestones)"
+        ),
+        scorer=heuristic_memory_scorer,
+        weight=1.0,
+        threshold=0.5,
+    ))
+    # Placeholder for future built-in criteria:
+    # - consistency_scorer: measures output alignment with identity spec
+    # - policy_compliance_scorer: checks policy adherence
+    # - growth_trend_scorer: tracks improvement over time
+    # - empathy_scorer: measures relational/social quality

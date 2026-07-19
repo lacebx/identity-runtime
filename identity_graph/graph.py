@@ -1,10 +1,10 @@
 from __future__ import annotations
-from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional, Set
-from enum import Enum
-import uuid
-from datetime import datetime
 
+import uuid
+from dataclasses import dataclass, field
+from datetime import datetime
+from enum import Enum
+from typing import Any, Dict, List, Optional, Set
 
 # ---------------------------------------------------------------------------
 # Identity Graph — a first-class subsystem
@@ -77,6 +77,14 @@ class GraphEdge:
     last_interaction: Optional[datetime] = None
     interaction_count: int = 0
     metadata: Dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if isinstance(self.edge_type, str):
+            self.edge_type = EdgeType(self.edge_type)
+        if isinstance(self.trust_level, str):
+            self.trust_level = TrustLevel[self.trust_level.upper()]
+        elif isinstance(self.trust_level, int):
+            self.trust_level = TrustLevel(self.trust_level)
 
     def interact(self) -> None:
         self.last_interaction = datetime.utcnow()
@@ -191,6 +199,33 @@ class IdentityGraph:
     # ------------------------------------------------------------------
     # Queries
     # ------------------------------------------------------------------
+
+    def get_relationships(self, identity_id: str) -> List[GraphEdge]:
+        """Alias for edges_from — all outgoing relationships from an identity."""
+        return self.edges_from(identity_id)
+
+    def get_relationship(
+        self, source_id: str, target_id: str
+    ) -> Optional[GraphEdge]:
+        """Alias for get_edge."""
+        return self.get_edge(source_id, target_id)
+
+    def get_trusted(
+        self, source_id: str, min_trust: "TrustLevel" = TrustLevel.MEDIUM
+    ) -> List[GraphEdge]:
+        """All outgoing relationships meeting a minimum trust threshold."""
+        return [
+            e for e in self._adjacency.get(source_id, [])
+            if e.trust_level.value >= min_trust.value
+        ]
+
+    def record_interaction(self, source_id: str, target_id: str) -> None:
+        """Alias for interact."""
+        self.interact(source_id, target_id)
+
+    def remove_relationship(self, source_id: str, target_id: str) -> bool:
+        """Alias for disconnect."""
+        return self.disconnect(source_id, target_id)
 
     def neighbors(self, identity_id: str) -> List[str]:
         """All identity IDs this identity has outgoing relationships to."""

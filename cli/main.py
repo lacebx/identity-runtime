@@ -28,7 +28,6 @@ import sys
 from pathlib import Path
 from typing import Optional
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -53,6 +52,15 @@ def _get_snapshot_manager(storage, identity_id: str):
     return SnapshotManager(storage, identity_id)
 
 
+def _get_adapter(args: argparse.Namespace):
+    from adapters import get_adapter
+    import json
+    config = json.loads(args.adapter_config) if args.adapter_config != "{}" else {}
+    if args.adapter and "model" not in config:
+        config["model"] = getattr(args, "model", None) or "gpt-4o"
+    return get_adapter(args.adapter, **config)
+
+
 def _print_json(data: dict) -> None:
     print(json.dumps(data, indent=2, default=str))
 
@@ -74,7 +82,8 @@ def cmd_create(args: argparse.Namespace) -> int:
     """
     Create a new identity and persist its initial snapshot.
     """
-    import uuid, time
+    import time
+    import uuid
 
     identity_id = args.id or str(uuid.uuid4())[:8]
     storage = _get_storage(args)
@@ -97,7 +106,7 @@ def cmd_create(args: argparse.Namespace) -> int:
     }
 
     snap_id = manager.capture(initial_state, label="initial")
-    print(f"Identity created.")
+    print("Identity created.")
     print(f"  id          : {identity_id}")
     print(f"  name        : {args.name}")
     print(f"  persona     : {args.persona}")
@@ -206,17 +215,20 @@ def cmd_chat(args: argparse.Namespace) -> int:
 
     identity_name = latest.modules.get("identity", {}).get("name", args.id)
     print(f"IdentityOS Chat - talking to: {identity_name}")
-    print(f"Type 'exit' or Ctrl-C to quit. Type ':snapshot' to checkpoint.")
+    print("Type 'exit' or Ctrl-C to quit. Type ':snapshot' to checkpoint.")
     print("-" * 60)
 
-    # Lazy-import the orchestrator so the CLI stays light when not chatting
+    # Lazy-import the orchestrator
     try:
-        from runtime.orchestrator import IdentityRuntime
-        runtime = IdentityRuntime(identity_id=args.id, storage=storage)
+        from runtime.orchestrator import IdentityRuntime, InteractionRequest
+        adapter = _get_adapter(args) if args.adapter else None
+        runtime = IdentityRuntime(storage=storage, adapter=adapter)
+        runtime.load(args.id)
+        session_id = runtime.start_session(args.id)
+        runtime_ok = True
     except Exception as e:
-        # Graceful degradation: run as a bare echo loop if runtime unavailable
-        print(f"[warn] Could not load runtime ({e}). Running in echo mode.")
-        runtime = None
+        print(f"[warn] Could not initialize runtime ({e}). Running in echo mode.")
+        runtime_ok = False
 
     session_turns = 0
     while True:
@@ -243,10 +255,15 @@ def cmd_chat(args: argparse.Namespace) -> int:
                 print(f"  {snap.summary()}")
             continue
 
-        if runtime is not None:
+        if runtime_ok:
             try:
-                response = runtime.chat(user_input)
-                print(f"{identity_name}> {response}")
+                req = InteractionRequest(
+                    identity_id=args.id,
+                    user_input=user_input,
+                    session_id=session_id,
+                )
+                resp = runtime.process(req)
+                print(f"{identity_name}> {resp.output}")
             except Exception as e:
                 print(f"[runtime error] {e}")
         else:
@@ -276,6 +293,16 @@ def build_parser() -> argparse.ArgumentParser:
         choices=["json", "sqlite"],
         default=DEFAULT_BACKEND,
         help="Storage backend (default: json)",
+    )
+    parser.add_argument(
+        "--adapter",
+        default="",
+        help="LLM adapter type: openai, anthropic, ollama, openrouter (default: none)",
+    )
+    parser.add_argument(
+        "--adapter-config",
+        default="{}",
+        help="JSON string with adapter config (e.g. '{\"api_key\":\"...\",\"base_url\":\"...\"}')",
     )
 
     sub = parser.add_subparsers(dest="command", required=True)
