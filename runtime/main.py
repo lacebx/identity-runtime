@@ -4,8 +4,10 @@ Routes all interactions through the IdentityRuntime orchestrator,
 which runs the full pipeline: policy → context → LLM → evaluate → store.
 """
 
+import json
 import logging
-from typing import List, Optional
+import os
+from typing import Any, List, Optional
 
 import uvicorn
 from fastapi import FastAPI, HTTPException
@@ -32,9 +34,24 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Initialize the runtime orchestrator with persistence
+# Initialize the runtime orchestrator with persistence and optional adapter
 storage = JSONFileBackend(root_dir=".identity_store")
-runtime = IdentityRuntime(storage=storage)
+
+adapter_type = os.environ.get("IDENTITY_ADAPTER", "")
+adapter = None
+if adapter_type:
+    try:
+        from adapters import get_adapter
+        adapter_config: dict[str, Any] = {}
+        adapter_config_str = os.environ.get("IDENTITY_ADAPTER_CONFIG", "{}")
+        if adapter_config_str:
+            adapter_config = json.loads(adapter_config_str)
+        adapter = get_adapter(adapter_type, **adapter_config)
+        logger.info(f"Using adapter: {adapter_type} (model={adapter_config.get('model', 'default')})")
+    except Exception as e:
+        logger.warning(f"Failed to initialize adapter '{adapter_type}': {e}")
+
+runtime = IdentityRuntime(storage=storage, adapter=adapter)
 register_default_criteria(runtime.evaluation_engine)
 loaded = runtime.load_persisted()
 if loaded:

@@ -16,7 +16,7 @@ from core.identity import IdentitySpec, IdentityStore
 from core.memory import MemoryFragment, MemoryStore, MemoryType
 from core.motivations import MotivationEngine
 from core.policies import PolicyEngine, PolicyScope
-from core.relationships import EdgeType, IdentityGraph
+from core.relationships import EdgeType, IdentityGraph, TrustLevel
 from core.skills import SkillRegistry
 from core.timeline import LifeEvent, LifeEventType, TimelineRegistry
 from runtime.event_bus import EventBus, EventType
@@ -120,8 +120,6 @@ class IdentityRuntime:
                 snapshot = self._storage.load_latest(identity_id)
             if snapshot:
                 identity_data = snapshot.get("modules", {}).get("identity", snapshot)
-                # CLI snapshots store created_at as a Unix timestamp;
-                # convert to ISO 8601 string for IdentitySpec.from_dict
                 if isinstance(identity_data.get("created_at"), (int, float)):
                     from datetime import datetime, timezone
                     identity_data["created_at"] = (
@@ -131,6 +129,9 @@ class IdentityRuntime:
                 spec = IdentitySpec.from_dict(identity_data)
                 self.identity_store.save(spec)
                 self.timeline_registry.create(spec.id)
+                self._load_timeline(spec.id)
+                self._load_relationships(spec.id)
+                self._load_goals(spec.id)
                 return spec
         return None
 
@@ -190,6 +191,176 @@ class IdentityRuntime:
             return
         try:
             self._storage.save_memory(memory.identity_id, memory.to_dict())
+        except Exception:
+            pass
+
+    # ------------------------------------------------------------------
+    # Timeline Persistence
+    # ------------------------------------------------------------------
+
+    def _persist_timeline(self, identity_id: str) -> None:
+        if not self._storage:
+            return
+        timeline = self.timeline_registry.get(identity_id)
+        if not timeline:
+            return
+        try:
+            events_data = []
+            for event in timeline.events():
+                d = {
+                    "id": event.id,
+                    "identity_id": event.identity_id,
+                    "event_type": event.event_type.value,
+                    "title": event.title,
+                    "description": event.description,
+                    "significance": event.significance,
+                    "linked_entity_id": event.linked_entity_id,
+                    "occurred_at": event.occurred_at.isoformat(),
+                    "metadata": event.metadata,
+                }
+                events_data.append(d)
+            self._storage.save(identity_id, "timeline", {
+                "events": events_data,
+                "created_at": timeline.created_at.isoformat(),
+            })
+        except Exception:
+            pass
+
+    def _load_timeline(self, identity_id: str) -> None:
+        if not self._storage:
+            return
+        try:
+            data = self._storage.load(identity_id, "timeline")
+            if not data:
+                return
+            from datetime import datetime
+            timeline = self.timeline_registry.get_or_create(identity_id)
+            for ed in data.get("events", []):
+                event = LifeEvent(
+                    id=ed["id"],
+                    identity_id=ed["identity_id"],
+                    event_type=LifeEventType(ed["event_type"]),
+                    title=ed.get("title", ""),
+                    description=ed.get("description", ""),
+                    significance=ed.get("significance", 3),
+                    linked_entity_id=ed.get("linked_entity_id"),
+                    occurred_at=datetime.fromisoformat(ed["occurred_at"]),
+                    metadata=ed.get("metadata", {}),
+                )
+                timeline.record(event)
+        except Exception:
+            pass
+
+    # ------------------------------------------------------------------
+    # Relationship Persistence
+    # ------------------------------------------------------------------
+
+    def _persist_relationships(self, identity_id: str) -> None:
+        if not self._storage:
+            return
+        try:
+            edges = self.identity_graph.get_relationships(identity_id)
+            edges_data = []
+            for e in edges:
+                edges_data.append({
+                    "id": e.id,
+                    "source_id": e.source_id,
+                    "target_id": e.target_id,
+                    "edge_type": e.edge_type.value,
+                    "trust_level": e.trust_level.value,
+                    "strength": e.strength,
+                    "bidirectional": e.bidirectional,
+                    "context": e.context,
+                    "permissions": e.permissions,
+                    "labels": e.labels,
+                    "established_at": e.established_at.isoformat(),
+                    "last_interaction": e.last_interaction.isoformat() if e.last_interaction else None,
+                    "interaction_count": e.interaction_count,
+                    "metadata": e.metadata,
+                })
+            self._storage.save(identity_id, "relationships", {"edges": edges_data})
+        except Exception:
+            pass
+
+    def _load_relationships(self, identity_id: str) -> None:
+        if not self._storage:
+            return
+        try:
+            data = self._storage.load(identity_id, "relationships")
+            if not data:
+                return
+            for ed in data.get("edges", []):
+                self.identity_graph.connect(
+                    source_id=ed["source_id"],
+                    target_id=ed["target_id"],
+                    edge_type=EdgeType(ed["edge_type"]),
+                    trust_level=TrustLevel(ed["trust_level"]),
+                    bidirectional=ed.get("bidirectional", False),
+                )
+        except Exception:
+            pass
+
+    # ------------------------------------------------------------------
+    # Goal Persistence
+    # ------------------------------------------------------------------
+
+    def _persist_goals(self, identity_id: str) -> None:
+        if not self._storage:
+            return
+        try:
+            goals_data = []
+            for g in self.goal_engine.active():
+                goals_data.append({
+                    "id": g.id,
+                    "title": g.title,
+                    "description": g.description,
+                    "status": g.status.value,
+                    "priority": g.priority.value,
+                    "scope": g.scope.value,
+                    "parent_id": g.parent_id,
+                    "progress": g.progress,
+                    "created_at": g.created_at.isoformat(),
+                    "updated_at": g.updated_at.isoformat(),
+                    "deadline": g.deadline.isoformat() if g.deadline else None,
+                    "tags": g.tags,
+                    "metadata": g.metadata,
+                    "success_criteria": g.success_criteria,
+                    "required_skills": g.required_skills,
+                    "required_knowledge": g.required_knowledge,
+                })
+            self._storage.save(identity_id, "goals", {"goals": goals_data})
+        except Exception:
+            pass
+
+    def _load_goals(self, identity_id: str) -> None:
+        if not self._storage:
+            return
+        try:
+            data = self._storage.load(identity_id, "goals")
+            if not data:
+                return
+            from datetime import datetime
+            from core.goals import Goal, GoalStatus, GoalPriority, GoalScope
+            for gd in data.get("goals", []):
+                goal = Goal(
+                    id=gd["id"],
+                    title=gd["title"],
+                    description=gd.get("description", ""),
+                    status=GoalStatus(gd["status"]),
+                    priority=GoalPriority(gd["priority"]),
+                    scope=GoalScope(gd.get("scope", "persistent")),
+                    parent_id=gd.get("parent_id"),
+                    progress=gd.get("progress", 0.0),
+                    created_at=datetime.fromisoformat(gd["created_at"]),
+                    updated_at=datetime.fromisoformat(gd["updated_at"]),
+                    deadline=datetime.fromisoformat(gd["deadline"]) if gd.get("deadline") else None,
+                    tags=gd.get("tags", []),
+                    metadata=gd.get("metadata", {}),
+                    success_criteria=gd.get("success_criteria", ""),
+                    required_skills=gd.get("required_skills", []),
+                    required_knowledge=gd.get("required_knowledge", []),
+                )
+                self.goal_engine.add(goal)
         except Exception:
             pass
 
@@ -331,6 +502,8 @@ class IdentityRuntime:
             skill_registry=self.skill_registry,
             goal_engine=self.goal_engine,
             identity_graph=self.identity_graph,
+            motivation_engine=self.motivation_engine,
+            timeline_registry=self.timeline_registry,
             query=sanitized_input,
             top_k_memories=top_k_memories,
         )
@@ -441,6 +614,7 @@ class IdentityRuntime:
                 metadata={"session_id": request.session_id, "eval_score": eval_report.overall_score},
             ),
         )
+        self._persist_timeline(identity.id)
         self._emit(
             EventType.LIFE_EVENT_RECORDED,
             identity_id=identity.id,
@@ -455,6 +629,10 @@ class IdentityRuntime:
             edge_type=EdgeType.PEER,
             bidirectional=False,
         )
+        self._persist_relationships(identity.id)
+
+        # Stage 10: Persist goals
+        self._persist_goals(identity.id)
 
         return InteractionResponse(
             request_id=request.id,

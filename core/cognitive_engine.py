@@ -73,9 +73,9 @@ class ContextComposer:
         include_memory: bool = True,
         include_skills: bool = True,
         include_goals: bool = True,
-        include_relationships: bool = False,
-        include_motivations: bool = False,
-        include_timeline: bool = False,
+        include_relationships: bool = True,
+        include_motivations: bool = True,
+        include_timeline: bool = True,
     ):
         self.max_tokens = max_tokens
         self.include_identity = include_identity

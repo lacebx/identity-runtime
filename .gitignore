@@ -13,3 +13,4 @@ build/
 .DS_Store
 .coverage
 identity_runtime.db
+.identity_store/

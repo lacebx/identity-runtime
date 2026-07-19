@@ -52,6 +52,15 @@ def _get_snapshot_manager(storage, identity_id: str):
     return SnapshotManager(storage, identity_id)
 
 
+def _get_adapter(args: argparse.Namespace):
+    from adapters import get_adapter
+    import json
+    config = json.loads(args.adapter_config) if args.adapter_config != "{}" else {}
+    if args.adapter and "model" not in config:
+        config["model"] = getattr(args, "model", None) or "gpt-4o"
+    return get_adapter(args.adapter, **config)
+
+
 def _print_json(data: dict) -> None:
     print(json.dumps(data, indent=2, default=str))
 
@@ -212,7 +221,8 @@ def cmd_chat(args: argparse.Namespace) -> int:
     # Lazy-import the orchestrator
     try:
         from runtime.orchestrator import IdentityRuntime, InteractionRequest
-        runtime = IdentityRuntime(storage=storage)
+        adapter = _get_adapter(args) if args.adapter else None
+        runtime = IdentityRuntime(storage=storage, adapter=adapter)
         runtime.load(args.id)
         session_id = runtime.start_session(args.id)
         runtime_ok = True
@@ -283,6 +293,16 @@ def build_parser() -> argparse.ArgumentParser:
         choices=["json", "sqlite"],
         default=DEFAULT_BACKEND,
         help="Storage backend (default: json)",
+    )
+    parser.add_argument(
+        "--adapter",
+        default="",
+        help="LLM adapter type: openai, anthropic, ollama, openrouter (default: none)",
+    )
+    parser.add_argument(
+        "--adapter-config",
+        default="{}",
+        help="JSON string with adapter config (e.g. '{\"api_key\":\"...\",\"base_url\":\"...\"}')",
     )
 
     sub = parser.add_subparsers(dest="command", required=True)
