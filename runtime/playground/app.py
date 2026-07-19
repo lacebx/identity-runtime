@@ -513,10 +513,18 @@ async def api_configure_adapter(body: dict):
     manager._maybe_configure_adapter(rt)
 
     configured = rt.adapter is not None
+    msg = "ok"
+    if not configured:
+        msg = (
+            f"Adapter '{adapter_type}' created but may fail at runtime. "
+            "Set the corresponding env var (e.g. OPENAI_API_KEY, ANTHROPIC_API_KEY, "
+            "OPENROUTER_API_KEY) or pass api_key explicitly."
+        )
     return JSONResponse({
         "configured": configured,
         "adapter": adapter_type,
         "model": manager._adapter_model or "default",
+        "message": msg,
     })
 
 

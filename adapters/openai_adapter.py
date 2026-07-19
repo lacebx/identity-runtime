@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from typing import Any, Optional
 
 from .base import BaseAdapter
@@ -32,6 +33,8 @@ class OpenAIAdapter(BaseAdapter):
         max_tokens: int = 1024,
         **kwargs
     ):
+        if api_key is None:
+            api_key = os.environ.get("OPENAI_API_KEY")
         super().__init__(model=model, **kwargs)
         self.api_key = api_key
         self.base_url = base_url
@@ -113,6 +116,8 @@ class AnthropicAdapter(BaseAdapter):
         max_tokens: int = 1024,
         **kwargs
     ):
+        if api_key is None:
+            api_key = os.environ.get("ANTHROPIC_API_KEY")
         super().__init__(model=model, **kwargs)
         self.api_key = api_key
         self.max_tokens = max_tokens

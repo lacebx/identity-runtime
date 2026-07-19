@@ -524,7 +524,12 @@ function submitAdapterConfig() {
   .then(r => r.json())
   .then(data => {
     closeAdapterModal();
-    addLog(data.configured ? 'done' : 'err', `Adapter: ${data.adapter || 'none'} (${data.model})`);
+    if (data.configured) {
+      addLog('done', `Adapter: ${data.adapter} (${data.model})`);
+    } else {
+      addLog('err', `Adapter config issue: ${data.message || 'unknown'}`);
+      alert(data.message || 'Adapter could not be configured.');
+    }
     if (currentIdentity) loadIdentity(currentIdentity);
   })
   .catch(err => alert('Failed: ' + err.message));
