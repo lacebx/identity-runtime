@@ -13,6 +13,7 @@ document.addEventListener('DOMContentLoaded', () => {
   });
   document.getElementById('btn-create').addEventListener('click', showCreateModal);
   document.getElementById('btn-restart').addEventListener('click', restartRuntime);
+  document.getElementById('btn-configure-adapter').addEventListener('click', showAdapterModal);
 });
 
 function loadIdentityList() {
@@ -465,6 +466,70 @@ function timeAgo(iso) {
   return d.toLocaleTimeString();
 }
 
+/* Adapter configure modal */
+function showAdapterModal() {
+  const overlay = document.createElement('div');
+  overlay.className = 'modal-overlay';
+  overlay.id = 'adapter-modal';
+  overlay.innerHTML = `
+    <div class="modal">
+      <h2>Configure Adapter</h2>
+      <p style="font-size:12px;color:var(--text2);margin-bottom:12px">
+        Also reads from env: IDENTITY_ADAPTER, IDENTITY_ADAPTER_CONFIG, OPENAI_API_KEY, ANTHROPIC_API_KEY
+      </p>
+      <label>Adapter</label>
+      <select id="cfg-adapter" style="width:100%;background:var(--bg);color:var(--text);border:1px solid var(--border);padding:6px 8px;border-radius:4px;margin-bottom:10px">
+        <option value="">None (no LLM)</option>
+        <option value="openai">OpenAI</option>
+        <option value="anthropic">Anthropic</option>
+        <option value="ollama">Ollama (local)</option>
+        <option value="openrouter">OpenRouter</option>
+      </select>
+      <label>Model (optional)</label>
+      <input id="cfg-model" placeholder="e.g. gpt-4o" />
+      <label>API Key (optional)</label>
+      <input id="cfg-api-key" type="password" placeholder="sk-... or leave blank for env var" />
+      <label>Base URL (optional — for custom endpoints)</label>
+      <input id="cfg-base-url" placeholder="e.g. http://localhost:11434/v1" />
+      <div class="modal-actions">
+        <button class="btn" onclick="closeAdapterModal()">Cancel</button>
+        <button class="btn btn-primary" onclick="submitAdapterConfig()">Apply</button>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(overlay);
+}
+
+function closeAdapterModal() {
+  document.getElementById('adapter-modal')?.remove();
+}
+
+function submitAdapterConfig() {
+  const adapter = document.getElementById('cfg-adapter').value;
+  const model = document.getElementById('cfg-model').value.trim() || undefined;
+  const apiKey = document.getElementById('cfg-api-key').value.trim() || undefined;
+  const baseUrl = document.getElementById('cfg-base-url').value.trim() || undefined;
+
+  const body = {};
+  if (adapter) body.adapter = adapter;
+  if (model) body.model = model;
+  if (apiKey) body.api_key = apiKey;
+  if (baseUrl) body.base_url = baseUrl;
+
+  fetch('/playground/api/configure-adapter', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(body),
+  })
+  .then(r => r.json())
+  .then(data => {
+    closeAdapterModal();
+    addLog(data.configured ? 'done' : 'err', `Adapter: ${data.adapter || 'none'} (${data.model})`);
+    if (currentIdentity) loadIdentity(currentIdentity);
+  })
+  .catch(err => alert('Failed: ' + err.message));
+}
+
 /* Create identity modal */
 function showCreateModal() {
   const overlay = document.createElement('div');
@@ -491,6 +556,8 @@ function showCreateModal() {
       </select>
       <label>Model (optional)</label>
       <input id="create-model" placeholder="e.g. gpt-4o" />
+      <label>API Key (optional — also reads OPENAI_API_KEY / ANTHROPIC_API_KEY env)</label>
+      <input id="create-api-key" type="password" placeholder="sk-..." />
       <div class="modal-actions">
         <button class="btn" onclick="closeCreateModal()">Cancel</button>
         <button class="btn btn-primary" onclick="submitCreate()">Create</button>
@@ -514,6 +581,7 @@ function submitCreate() {
   const model = document.getElementById('create-model').value.trim() || undefined;
   if (!name) { alert('Name is required'); return; }
 
+  const apiKey = document.getElementById('create-api-key')?.value?.trim() || undefined;
   const body = { name, persona, system_prompt: systemPrompt };
   if (id) body.identity_id = id;
   if (adapter) body.adapter = adapter;
@@ -526,6 +594,14 @@ function submitCreate() {
   })
   .then(r => r.json())
   .then(data => {
+    // Configure adapter with API key if provided
+    if (adapter && apiKey) {
+      fetch('/playground/api/configure-adapter', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ adapter, model, api_key: apiKey }),
+      }).catch(() => {});
+    }
     closeCreateModal();
     loadIdentityList();
     setTimeout(() => {

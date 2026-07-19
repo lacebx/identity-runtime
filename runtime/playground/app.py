@@ -20,6 +20,8 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 
+import os
+
 from runtime.orchestrator import IdentityRuntime, InteractionRequest
 from runtime.persistence import JSONFileBackend
 from runtime.event_bus import EventType, Event
@@ -147,8 +149,19 @@ class RuntimeManager:
         self._runtime: Optional[IdentityRuntime] = None
         self._sessions: Dict[str, str] = {}
         self._storage = JSONFileBackend(root_dir=".identity_store")
-        self._adapter_name: Optional[str] = None
+
+        # Read adapter config from env vars (same convention as runtime/main.py)
+        self._adapter_name: Optional[str] = os.environ.get("IDENTITY_ADAPTER") or None
         self._adapter_model: Optional[str] = None
+        self._adapter_kwargs: dict = {}
+        adapter_config_str = os.environ.get("IDENTITY_ADAPTER_CONFIG", "{}")
+        if adapter_config_str:
+            try:
+                import json as _json
+                self._adapter_kwargs = _json.loads(adapter_config_str)
+                self._adapter_model = self._adapter_kwargs.get("model")
+            except Exception:
+                self._adapter_kwargs = {}
 
     def get_or_create_runtime(self) -> IdentityRuntime:
         if self._runtime is not None:
@@ -204,10 +217,10 @@ class RuntimeManager:
         if self._adapter_name and rt.adapter is None:
             try:
                 from adapters import get_adapter
-                rt.adapter = get_adapter(
-                    self._adapter_name,
-                    model=self._adapter_model,
-                )
+                kwargs = dict(self._adapter_kwargs)
+                if self._adapter_model and "model" not in kwargs:
+                    kwargs["model"] = self._adapter_model
+                rt.adapter = get_adapter(self._adapter_name, **kwargs)
             except Exception:
                 pass
 
@@ -479,6 +492,32 @@ async def api_chat(body: dict):
         return JSONResponse({"error": "user_input is required"}, status_code=400)
     result = manager.process_message(identity_id, user_input)
     return JSONResponse(result)
+
+
+@app.post("/playground/api/configure-adapter")
+async def api_configure_adapter(body: dict):
+    adapter_type = body.get("adapter", "")
+    if not adapter_type:
+        return JSONResponse({"error": "adapter type is required"}, status_code=400)
+
+    manager._adapter_name = adapter_type
+    manager._adapter_model = body.get("model")
+    manager._adapter_kwargs = {
+        k: v for k, v in body.items()
+        if k in ("api_key", "base_url", "organization", "temperature", "max_tokens", "model")
+        and v is not None
+    }
+
+    rt = manager.get_or_create_runtime()
+    rt.adapter = None
+    manager._maybe_configure_adapter(rt)
+
+    configured = rt.adapter is not None
+    return JSONResponse({
+        "configured": configured,
+        "adapter": adapter_type,
+        "model": manager._adapter_model or "default",
+    })
 
 
 @app.post("/playground/api/restart")
