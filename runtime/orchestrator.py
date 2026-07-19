@@ -4,21 +4,21 @@ from typing import Any, Dict, List, Optional
 import uuid
 from datetime import datetime
 
-from ..core.identity import IdentitySpec, IdentityStore
-from ..core.memory import MemoryStore, MemoryFragment, MemoryType
-from ..core.knowledge import KnowledgePack
-from ..core.skills import SkillRegistry
-from ..core.goals import GoalEngine
-from ..core.relationships import IdentityGraph
-from ..core.policies import PolicyEngine, PolicyScope
-from ..core.evaluation import EvaluationEngine
-from ..core.cognitive_engine import ContextComposer, ComposedContext
-from ..core.experience import ExperienceStore
-from ..core.timeline import TimelineRegistry
-from ..core.motivations import MotivationEngine
-from ..core.permissions import PermissionManager
-from ..core.snapshot import SnapshotManager
-from ..runtime.event_bus import EventBus, EventType, Event
+from core.identity import IdentitySpec, IdentityStore
+from core.memory import MemoryStore, MemoryFragment, MemoryType
+from core.knowledge import KnowledgePack
+from core.skills import SkillRegistry
+from core.goals import GoalEngine
+from core.relationships import IdentityGraph
+from core.policies import PolicyEngine, PolicyScope
+from core.evaluation import EvaluationEngine, register_default_criteria
+from core.cognitive_engine import ContextComposer, ComposedContext
+from core.experience import ExperienceStore
+from core.timeline import TimelineRegistry
+from core.motivations import MotivationEngine
+from core.permissions import PermissionManager
+from core.snapshot import SnapshotManager
+from runtime.event_bus import EventBus, EventType, Event
 
 
 @dataclass

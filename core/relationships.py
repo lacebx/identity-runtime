@@ -14,7 +14,7 @@ The canonical Identity Graph lives at identity_graph/graph.py and provides:
 Use identity_graph.graph directly for new code.
 """
 
-from ..identity_graph.graph import (
+from identity_graph.graph import (
     IdentityGraph,
     GraphEdge,
     EdgeType,

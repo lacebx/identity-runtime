@@ -2,12 +2,12 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from ..runtime.orchestrator import IdentityRuntime
-    from ..core.identity import IdentitySpec
-    from ..core.memory import MemoryFragment
-    from ..core.goals import Goal
-    from ..core.knowledge import KnowledgePack
-    from ..core.skills import Skill
+    from runtime.orchestrator import IdentityRuntime
+    from core.identity import IdentitySpec
+    from core.memory import MemoryFragment
+    from core.goals import Goal
+    from core.knowledge import KnowledgePack
+    from core.skills import Skill
 
 
 class IdentityObject:
@@ -76,7 +76,7 @@ class IdentityObject:
         Send a message to this identity and get a response.
         This is the primary interaction method.
         """
-        from ..runtime.orchestrator import InteractionRequest
+        from runtime.orchestrator import InteractionRequest
         request = InteractionRequest(
             identity_id=self._identity_id,
             user_input=message,
@@ -102,7 +102,7 @@ class IdentityObject:
         """
         Store a memory for this identity.
         """
-        from ..core.memory import MemoryFragment, MemoryType
+        from core.memory import MemoryFragment, MemoryType
         self._runtime.memory_store.add(MemoryFragment(
             identity_id=self._identity_id,
             content=content,
@@ -132,7 +132,7 @@ class IdentityObject:
         """
         Add a goal for this identity to pursue.
         """
-        from ..core.goals import Goal
+        from core.goals import Goal
         goal = Goal(
             title=title,
             description=description,
