@@ -160,9 +160,19 @@ function renderGoals(goals) {
   });
 }
 
+/* Edge type colors */
+const EDGE_COLORS = {
+  PEER: '#58a6ff',
+  TRUSTED: '#3fb950',
+  MENTOR: '#bc8cff',
+  COLLABORATOR: '#d29922',
+  ADVERSARIAL: '#f85149',
+  NEUTRAL: '#8b949e',
+};
+
 function renderRelationships(edges) {
   const el = document.getElementById('panel-relationships-body');
-  el.innerHTML = '<svg class="relation-graph" id="relation-svg"></svg>';
+  el.innerHTML = '<svg class="relation-graph" id="relation-svg"></svg><div class="rel-tooltip" id="rel-tooltip-div"></div>';
   if (!edges || edges.length === 0) {
     el.innerHTML = '<div class="empty">No relationships yet.</div>';
     return;
@@ -174,19 +184,19 @@ function drawGraph(edges) {
   const svg = document.getElementById('relation-svg');
   if (!svg) return;
   const w = svg.parentElement.clientWidth || 300;
-  const h = 120;
+  const h = 140;
   svg.setAttribute('viewBox', `0 0 ${w} ${h}`);
 
-  // Collect all nodes
   const nodes = new Map();
   edges.forEach(e => {
-    if (!nodes.has(e.source_id)) nodes.set(e.source_id, { id: e.source_id, x: 0, y: 0 });
-    if (!nodes.has(e.target_id)) nodes.set(e.target_id, { id: e.target_id, x: 0, y: 0 });
+    if (!nodes.has(e.source_id)) nodes.set(e.source_id, { id: e.source_id, x: 0, y: 0, degree: 0 });
+    if (!nodes.has(e.target_id)) nodes.set(e.target_id, { id: e.target_id, x: 0, y: 0, degree: 0 });
+    nodes.get(e.source_id).degree++;
+    nodes.get(e.target_id).degree++;
   });
   const ids = [...nodes.keys()];
   if (ids.length === 0) return;
 
-  // Simple layout: center source nodes, spread targets
   const cx = w / 2, cy = h / 2;
   if (ids.length === 1) {
     nodes.get(ids[0]).x = cx;
@@ -205,37 +215,101 @@ function drawGraph(edges) {
     });
   }
 
-  let html = '<defs><marker id="arrowhead" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="var(--border)"/></marker></defs>';
+  let html = `<defs>
+    <marker id="arrowhead" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="var(--border)"/></marker>
+  </defs>`;
 
   edges.forEach(e => {
     const src = nodes.get(e.source_id);
     const dst = nodes.get(e.target_id);
     if (!src || !dst) return;
-    html += `<line class="relation-edge" x1="${src.x}" y1="${src.y}" x2="${dst.x}" y2="${dst.y}" marker-end="url(#arrowhead)" />`;
-    if (e.interaction_count > 0) {
-      const mx = (src.x + dst.x) / 2, my = (src.y + dst.y) / 2;
-      html += `<text class="relation-edge-text" x="${mx}" y="${my-4}" text-anchor="middle">${e.interaction_count} interactions</text>`;
-    }
+
+    const strength = e.strength || 0.5;
+    const sw = Math.max(1, Math.min(6, 1 + strength * 5));
+    const color = EDGE_COLORS[e.edge_type] || '#8b949e';
+    const opacity = 0.4 + strength * 0.6;
+    const mx = (src.x + dst.x) / 2;
+    const my = (src.y + dst.y) / 2;
+
+    html += `<line class="relation-edge" x1="${src.x}" y1="${src.y}" x2="${dst.x}" y2="${dst.y}"
+      stroke="${color}" stroke-width="${sw}" stroke-opacity="${opacity}"
+      marker-end="url(#arrowhead)"
+      data-source="${esc(e.source_id)}" data-target="${esc(e.target_id)}"
+      onmouseenter="showRelTooltip(event, '${esc(e.source_id)}', '${esc(e.target_id)}', '${esc(e.edge_type)}', ${strength}, ${e.interaction_count || 0}, '${esc(e.trust_level||'unknown')}', ${e.strength || 0.5})"
+      onmouseleave="hideRelTooltip(event)"
+      onmousemove="moveRelTooltip(event)" />
+
+    <!-- Strength bar below edge middle -->
+    <rect x="${mx - 24}" y="${my + 8}" width="48" height="4" rx="2" fill="var(--surface2)" />
+    <rect x="${mx - 24}" y="${my + 8}" width="${Math.round(48 * strength)}" height="4" rx="2" fill="${color}" opacity="0.8" />
+
+    <!-- Edge label -->
+    <text class="relation-edge-text" x="${mx}" y="${my - 6}" text-anchor="middle" fill="${color}">${esc(e.edge_type)}</text>
+    <text class="relation-edge-text" x="${mx}" y="${my - 16}" text-anchor="middle">${e.interaction_count || 0} interactions</text>`;
   });
 
   nodes.forEach((n, id) => {
     const isIdentity = id === currentIdentity;
-    const r = isIdentity ? 8 : 6;
-    html += `<circle class="relation-node" cx="${n.x}" cy="${n.y}" r="${r}" data-id="${esc(id)}" onclick="showRelationInfo('${esc(id)}')"/>`;
-    html += `<text class="relation-node-label" x="${n.x}" y="${n.y + r + 12}" text-anchor="middle" font-weight="${isIdentity ? 'bold' : 'normal'}">${isIdentity ? id + ' (self)' : truncate(id, 16)}</text>`;
+    const maxDegree = Math.max(1, ...ids.map(i => nodes.get(i).degree));
+    const r = isIdentity ? 10 : Math.max(5, 5 + (n.degree / maxDegree) * 8);
+    html += `<circle class="relation-node" cx="${n.x}" cy="${n.y}" r="${r}"
+      data-id="${esc(id)}"
+      onmouseenter="showRelTooltip(event, '${esc(currentIdentity)}', '${esc(id)}', '', 0, 0, '', 0)"
+      onmouseleave="hideRelTooltip(event)"
+      onmousemove="moveRelTooltip(event)" />
+    <text class="relation-node-label" x="${n.x}" y="${n.y + r + 12}" text-anchor="middle"
+      font-weight="${isIdentity ? 'bold' : 'normal'}"
+      fill="${isIdentity ? 'var(--accent)' : 'var(--text)'}">${isIdentity ? truncate(id, 12) + ' (self)' : truncate(id, 14)}</text>`;
   });
 
   svg.innerHTML = html;
 }
 
-function showRelationInfo(id) {
-  fetch(`/playground/api/identity/${encodeURIComponent(currentIdentity)}/relationships`)
-    .then(r => r.json())
-    .then(edges => {
-      const edge = edges.find(e => e.target_id === id || e.source_id === id);
-      if (!edge) return;
-      alert(`Relationship: ${edge.source_id} → ${edge.target_id}\nType: ${edge.edge_type}\nTrust: ${edge.trust_level}\nStrength: ${edge.strength?.toFixed(2)}\nInteractions: ${edge.interaction_count}`);
-    });
+function showRelTooltip(evt, src, target, edgeType, strength, interactions, trustLevel) {
+  const div = document.getElementById('rel-tooltip-div');
+  if (!div) return;
+  let html = '';
+  if (edgeType) {
+    html = `<div class="rel-tt-edge">
+      <div class="rel-tt-row"><span class="rel-tt-label">From</span><span class="rel-tt-val">${esc(src)}</span></div>
+      <div class="rel-tt-row"><span class="rel-tt-label">To</span><span class="rel-tt-val">${esc(target)}</span></div>
+      <div class="rel-tt-row"><span class="rel-tt-label">Type</span><span class="rel-tt-val" style="color:${EDGE_COLORS[edgeType]||'var(--text)'}">${esc(edgeType)}</span></div>
+      <div class="rel-tt-row"><span class="rel-tt-label">Strength</span><span class="rel-tt-val">${(strength * 100).toFixed(0)}%</span></div>
+      <div class="rel-tt-row"><span class="rel-tt-label">Interactions</span><span class="rel-tt-val">${interactions}</span></div>
+      <div class="rel-tt-row"><span class="rel-tt-label">Trust</span><span class="rel-tt-val">${esc(trustLevel)}</span></div>
+    </div>`;
+  } else {
+    html = `<div class="rel-tt-node">
+      <div class="rel-tt-row"><span class="rel-tt-label">Identity</span><span class="rel-tt-val">${esc(target)}</span></div>
+      ${target === currentIdentity ? '<div class="rel-tt-row"><span class="rel-tt-label" style="color:var(--accent)">Self</span></div>' : ''}
+    </div>`;
+  }
+  div.innerHTML = html;
+  div.style.display = 'block';
+  positionTooltip(evt);
+}
+
+function hideRelTooltip(evt) {
+  const div = document.getElementById('rel-tooltip-div');
+  if (div) div.style.display = 'none';
+}
+
+function moveRelTooltip(evt) {
+  positionTooltip(evt);
+}
+
+function positionTooltip(evt) {
+  const div = document.getElementById('rel-tooltip-div');
+  if (!div) return;
+  const panel = document.getElementById('panel-relationships-body');
+  if (!panel) return;
+  const rect = panel.getBoundingClientRect();
+  let x = evt.clientX - rect.left + 12;
+  let y = evt.clientY - rect.top - 10;
+  if (x + 180 > rect.width) x = evt.clientX - rect.left - 180;
+  if (y < 0) y = 10;
+  div.style.left = x + 'px';
+  div.style.top = y + 'px';
 }
 
 function renderAdapter(adapter) {
@@ -255,7 +329,6 @@ function renderAdapter(adapter) {
 function renderContext(contextText) {
   const el = document.getElementById('panel-context-body');
   if (!contextText) { el.innerHTML = '<div class="empty">No context yet. Send a message.</div>'; return; }
-  // Split into sections and render with headers
   const sections = contextText.split(/\n\n+/);
   let html = '';
   sections.forEach(s => {
@@ -271,19 +344,6 @@ function renderContext(contextText) {
     }
   });
   el.innerHTML = html;
-
-  // Glow new timeline events
-  if (!window._knownTimelineIds) window._knownTimelineIds = new Set();
-  events.forEach(e => {
-    if (!window._knownTimelineIds.has(e.id)) {
-      window._knownTimelineIds.add(e.id);
-      const item = el.querySelector(`[data-id="${esc(e.id)}"]`);
-      if (item) {
-        item.classList.add('glow');
-        setTimeout(() => item.classList.remove('glow'), 2000);
-      }
-    }
-  });
 }
 
 function renderEvaluation(evalData) {

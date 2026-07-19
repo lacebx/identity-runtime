@@ -597,6 +597,31 @@ body {
   border-top: 1px solid var(--border);
 }
 
+/* Relationship tooltip */
+.rel-tooltip {
+  display: none;
+  position: absolute;
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px 10px;
+  font-size: 11px;
+  font-family: var(--font-ui);
+  color: var(--text);
+  min-width: 140px;
+  pointer-events: none;
+  z-index: 50;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+}
+.rel-tt-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 1px 0;
+}
+.rel-tt-label { color: var(--text2); }
+.rel-tt-val { font-weight: 600; text-align: right; }
+
 /* Scrollbar */
 ::-webkit-scrollbar { width: 6px; }
 ::-webkit-scrollbar-track { background: transparent; }

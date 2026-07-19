@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Dict, List, Optional
 
@@ -67,14 +67,14 @@ class Motivation:
     expressed_as: List[str] = field(default_factory=list)  # Behaviors it produces
     conflicts_with: List[str] = field(default_factory=list)  # IDs of conflicting motivations
     reinforced_by: List[str] = field(default_factory=list)   # Experience IDs that strengthened this
-    established_at: datetime = field(default_factory=datetime.utcnow)
+    established_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc).replace(tzinfo=None))
     last_expressed: Optional[datetime] = None
     expression_count: int = 0
     metadata: Dict[str, Any] = field(default_factory=dict)
 
     def express(self) -> None:
         """Record that this motivation drove behavior."""
-        self.last_expressed = datetime.utcnow()
+        self.last_expressed = datetime.now(timezone.utc).replace(tzinfo=None)
         self.expression_count += 1
 
     def is_core(self) -> bool:

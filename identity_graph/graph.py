@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Dict, List, Optional, Set
 
@@ -73,7 +73,7 @@ class GraphEdge:
     context: str = ""         # How this relationship started
     permissions: List[str] = field(default_factory=list)
     labels: List[str] = field(default_factory=list)
-    established_at: datetime = field(default_factory=datetime.utcnow)
+    established_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc).replace(tzinfo=None))
     last_interaction: Optional[datetime] = None
     interaction_count: int = 0
     metadata: Dict[str, Any] = field(default_factory=dict)
@@ -87,7 +87,7 @@ class GraphEdge:
             self.trust_level = TrustLevel(self.trust_level)
 
     def interact(self) -> None:
-        self.last_interaction = datetime.utcnow()
+        self.last_interaction = datetime.now(timezone.utc).replace(tzinfo=None)
         self.interaction_count += 1
         self.reinforce()
 
@@ -195,6 +195,38 @@ class IdentityGraph:
         edge = self.get_edge(source_id, target_id)
         if edge:
             edge.interact()
+
+    def interact_or_connect(
+        self,
+        source_id: str,
+        target_id: str,
+        edge_type: EdgeType = EdgeType.PEER,
+        trust_level: TrustLevel = TrustLevel.MEDIUM,
+        bidirectional: bool = False,
+        **kwargs
+    ) -> GraphEdge:
+        """Reuse existing edge or create new one, then record interaction.
+
+        This is the key method for relationship evolution:
+        - If edge exists: increment interaction_count, update last_interaction, reinforce strength
+        - If edge does not exist: create it with initial interaction_count=1
+        - Avoids duplicate edges (the old behavior of appending a new PEER each time)
+        """
+        edge = self.get_edge(source_id, target_id)
+        if edge is not None:
+            edge.interact()
+            return edge
+        edge = self.connect(
+            source_id=source_id,
+            target_id=target_id,
+            edge_type=edge_type,
+            trust_level=trust_level,
+            bidirectional=bidirectional,
+            **kwargs
+        )
+        edge.interaction_count = 1
+        edge.last_interaction = datetime.now(timezone.utc).replace(tzinfo=None)
+        return edge
 
     # ------------------------------------------------------------------
     # Queries

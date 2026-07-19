@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from core.cognitive_engine import ComposedContext, ContextComposer
@@ -30,7 +30,7 @@ class InteractionRequest:
     user_input: str = ""
     session_id: Optional[str] = None
     metadata: Dict[str, Any] = field(default_factory=dict)
-    timestamp: datetime = field(default_factory=datetime.utcnow)
+    timestamp: datetime = field(default_factory=lambda: datetime.now(timezone.utc).replace(tzinfo=None))
 
 
 @dataclass
@@ -43,7 +43,7 @@ class InteractionResponse:
     policy_passed: bool = True
     eval_score: Optional[float] = None
     metadata: Dict[str, Any] = field(default_factory=dict)
-    timestamp: datetime = field(default_factory=datetime.utcnow)
+    timestamp: datetime = field(default_factory=lambda: datetime.now(timezone.utc).replace(tzinfo=None))
 
 
 class IdentityRuntime:
@@ -375,14 +375,33 @@ class IdentityRuntime:
     ) -> Optional[MemoryFragment]:
         """Classify user input and store a SEMANTIC memory if warranted.
 
-        Shared between process() and the /evaluate endpoint so both paths
-        produce identical classification and storage behavior.
+        Evolves existing semantic facts rather than duplicating:
+        - If a semantic memory of the same type with overlapping keywords exists,
+          update its content and reinforce importance
+        - Otherwise create a new semantic memory
         """
         if not is_worth_remembering(user_input, output):
             return None
         mem_type_str = classify_memory_type(user_input, output)
         if mem_type_str == "general":
             return None
+
+        # Extract key tokens from the input for dedup matching
+        input_lower = user_input.lower()
+        key_tokens = {w for w in input_lower.split() if len(w) > 3}
+
+        # Look for an existing semantic memory of the same type with overlapping content
+        existing = self._find_semantic_match(identity_id, mem_type_str, key_tokens, input_lower)
+
+        if existing is not None:
+            # Evolve existing fact
+            existing.content = user_input
+            existing.importance = min(1.0, existing.importance + 0.1)
+            existing.last_accessed = datetime.now(timezone.utc).replace(tzinfo=None)
+            existing.access_count += 1
+            self._persist_memory(existing)
+            return existing
+
         semantic = MemoryFragment(
             identity_id=identity_id,
             content=user_input,
@@ -395,6 +414,25 @@ class IdentityRuntime:
         self.memory_store.add(semantic)
         self._persist_memory(semantic)
         return semantic
+
+    def _find_semantic_match(
+        self,
+        identity_id: str,
+        mem_type: str,
+        key_tokens: set,
+        input_lower: str,
+    ) -> Optional[MemoryFragment]:
+        """Find an existing semantic memory that this new fact should replace."""
+        for frag in self.memory_store.by_identity(identity_id):
+            if frag.memory_type != MemoryType.SEMANTIC:
+                continue
+            if mem_type not in frag.tags:
+                continue
+            existing_lower = frag.content.lower()
+            overlap = key_tokens & {w for w in existing_lower.split() if len(w) > 3}
+            if len(overlap) >= 2:
+                return frag
+        return None
 
     def list_identities(self) -> List[IdentitySpec]:
         return self.identity_store.list_all()
@@ -597,12 +635,33 @@ class IdentityRuntime:
         )
 
         # 7b: Extract and store semantic memories (preferences, decisions, etc.)
-        self._extract_and_store_semantic_memory(
+        semantic_mem = self._extract_and_store_semantic_memory(
             user_input=sanitized_input,
             output=final_output,
             identity_id=identity.id,
             session_id=request.session_id,
         )
+
+        # Determine timeline title from semantic classification
+        tl_title = "Interaction"
+        tl_description = f"User said: {sanitized_input[:100]}"
+        tl_meta = {"session_id": request.session_id, "eval_score": eval_report.overall_score}
+        if semantic_mem:
+            mem_tags = semantic_mem.tags
+            if "preference" in mem_tags:
+                tl_title = "Learned preference"
+                tl_description = sanitized_input[:120]
+            elif "decision" in mem_tags:
+                tl_title = "Made decision"
+                tl_description = sanitized_input[:120]
+            elif "correction" in mem_tags:
+                tl_title = "Received correction"
+                tl_description = sanitized_input[:120]
+            elif "milestone" in mem_tags:
+                tl_title = "Milestone"
+                tl_description = sanitized_input[:120]
+            tl_meta["memory_id"] = semantic_mem.id
+            tl_meta["memory_type"] = semantic_mem.memory_type.value
 
         # Stage 8: Record timeline life event
         self.timeline_registry.record_event(
@@ -610,10 +669,10 @@ class IdentityRuntime:
             LifeEvent(
                 identity_id=identity.id,
                 event_type=LifeEventType.MILESTONE,
-                title="Interaction",
-                description=f"User said: {sanitized_input[:100]}",
+                title=tl_title,
+                description=tl_description,
                 significance=2,
-                metadata={"session_id": request.session_id, "eval_score": eval_report.overall_score},
+                metadata=tl_meta,
             ),
         )
         self._persist_timeline(identity.id)
@@ -621,13 +680,15 @@ class IdentityRuntime:
             EventType.LIFE_EVENT_RECORDED,
             identity_id=identity.id,
             session_id=request.session_id,
-            description="interaction recorded",
+            title=tl_title,
+            description=tl_description,
         )
 
-        # Stage 9: Update relationship graph
-        self.identity_graph.connect(
+        # Stage 9: Update relationship graph — reuse existing edge, evolve it
+        target = request.session_id or "user"
+        self.identity_graph.interact_or_connect(
             source_id=identity.id,
-            target_id=request.session_id or "user",
+            target_id=target,
             edge_type=EdgeType.PEER,
             bidirectional=False,
         )
