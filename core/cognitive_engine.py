@@ -182,3 +182,31 @@ class ContextComposer:
                 f"trust={e.trust_level.name} strength={e.strength:.2f}"
             )
         return "\n".join(lines)
+
+    # ------------------------------------------------------------------
+    # Backward-compatible API (matches old ContextBuilder.build)
+    # ------------------------------------------------------------------
+
+    async def build_context_string(
+        self,
+        message: str,
+        identity: "IdentitySpec",
+        user_id: str = "",
+        session_id: str = "",
+        include_relationships: bool = False,
+        top_k_memories: int = 5,
+    ) -> Dict[str, Any]:
+        """
+        DEPRECATED: Legacy API matching ContextBuilder.build().
+        Returns {'context': str, 'memories_used': int}.
+        """
+        ctx = self.compose(
+            identity=identity,
+            query=message,
+            top_k_memories=top_k_memories,
+        )
+        memories_used = ctx.memory_block.count("\n  [") if ctx.memory_block else 0
+        return {
+            "context": ctx.render(),
+            "memories_used": memories_used,
+        }

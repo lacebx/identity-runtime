@@ -264,17 +264,23 @@ class MemoryStore:
 
     # ── Stats ─────────────────────────────────────────────────────────────────
 
-    def stats(self) -> MemoryStats:
+    def stats(self, identity_id: str = "") -> MemoryStats:
         frags = list(self._fragments.values())
         if not frags:
-            return MemoryStats(identity_id=self.identity_id)
+            return MemoryStats(identity_id=identity_id)
+
+        if identity_id:
+            frags = [f for f in frags if f.identity_id == identity_id]
+
+        if not frags:
+            return MemoryStats(identity_id=identity_id)
 
         conf_dist: Dict[str, int] = {}
         for f in frags:
             conf_dist[f.confidence.value] = conf_dist.get(f.confidence.value, 0) + 1
 
         return MemoryStats(
-            identity_id=self.identity_id,
+            identity_id=identity_id or "all",
             total_fragments=len(frags),
             core_count=sum(1 for f in frags if f.memory_type == MemoryType.CORE),
             semantic_count=sum(1 for f in frags if f.memory_type == MemoryType.SEMANTIC),
@@ -291,7 +297,7 @@ class MemoryStore:
         return len(self._fragments)
 
     def __repr__(self) -> str:
-        return f"MemoryStore(identity_id={self.identity_id!r}, fragments={len(self)})"
+        return f"MemoryStore(fragments={len(self)})"
 
 
 # ─── Factory helpers ──────────────────────────────────────────────────────────
@@ -322,3 +328,216 @@ def make_memory(
 
 MemoryItem = MemoryFragment
 MemoryTier = MemoryType
+
+
+# ─── SQLite-backed Persistent Memory Store ───────────────────────────────────
+# The in-memory MemoryStore is the canonical domain object. For persistence,
+# use PersistentMemoryStore — a drop-in replacement with SQLite storage.
+# In production, swap to pgvector or Pinecone.
+# ──────────────────────────────────────────────────────────────────────────────
+
+import json
+import math
+import os
+import sqlite3
+import time
+
+
+_DB_PATH = os.environ.get("MEMORY_DB_PATH", "./identity_runtime.db")
+
+
+def _cosine_similarity(a: List[float], b: List[float]) -> float:
+    dot = sum(x * y for x, y in zip(a, b))
+    mag_a = math.sqrt(sum(x * x for x in a))
+    mag_b = math.sqrt(sum(x * x for x in b))
+    if mag_a == 0 or mag_b == 0:
+        return 0.0
+    return dot / (mag_a * mag_b)
+
+
+def _simple_embedding(text: str) -> List[float]:
+    vec = [0.0] * 128
+    for ch in text.lower():
+        idx = ord(ch) % 128
+        vec[idx] += 1.0
+    total = sum(vec)
+    if total > 0:
+        vec = [v / total for v in vec]
+    return vec
+
+
+class PersistentMemoryStore(MemoryStore):
+    """
+    SQLite-backed memory store that mirrors the MemoryStore API.
+
+    MemoryFragments are persisted to a local SQLite database with
+    embedding vectors for cosine-similarity search.
+
+    Usage is identical to MemoryStore — just pass it to the Runtime
+    instead of the in-memory version.
+    """
+
+    def __init__(self, db_path: str = _DB_PATH):
+        super().__init__()
+        self.db_path = db_path
+        self._init_db()
+
+    def _init_db(self):
+        conn = sqlite3.connect(self.db_path)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS core_memories (
+                id TEXT PRIMARY KEY,
+                identity_id TEXT NOT NULL,
+                content TEXT NOT NULL,
+                memory_type TEXT DEFAULT 'episodic',
+                confidence TEXT DEFAULT 'medium',
+                source TEXT DEFAULT 'unknown',
+                session_id TEXT,
+                importance REAL DEFAULT 0.5,
+                access_count INTEGER DEFAULT 0,
+                decay_factor REAL DEFAULT 1.0,
+                embedding TEXT,
+                embedding_id TEXT,
+                related_memory_ids TEXT DEFAULT '[]',
+                tags TEXT DEFAULT '[]',
+                extra TEXT DEFAULT '{}',
+                created_at TEXT NOT NULL,
+                last_accessed TEXT
+            )
+        """)
+        conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_core_memories_identity
+            ON core_memories (identity_id)
+        """)
+        conn.commit()
+        conn.close()
+
+    def add(self, fragment: MemoryFragment) -> MemoryFragment:
+        super().add(fragment)
+        conn = sqlite3.connect(self.db_path)
+        conn.execute("""
+            INSERT OR REPLACE INTO core_memories
+            (id, identity_id, content, memory_type, confidence,
+             source, session_id, importance, access_count, decay_factor,
+             embedding, embedding_id, related_memory_ids,
+             tags, extra, created_at, last_accessed)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            fragment.id, fragment.identity_id, fragment.content,
+            fragment.memory_type.value, fragment.confidence.value,
+            fragment.source, fragment.session_id,
+            fragment.importance, fragment.access_count, fragment.decay_factor,
+            json.dumps(_simple_embedding(fragment.content)),
+            fragment.embedding_id,
+            json.dumps(fragment.related_memory_ids),
+            json.dumps(fragment.tags),
+            json.dumps(fragment.extra),
+            fragment.created_at.isoformat(),
+            fragment.last_accessed.isoformat() if fragment.last_accessed else None,
+        ))
+        conn.commit()
+        conn.close()
+        return fragment
+
+    def _row_to_fragment(self, row: tuple) -> MemoryFragment:
+        col = {
+            "id": 0, "identity_id": 1, "content": 2, "memory_type": 3,
+            "confidence": 4, "source": 5, "session_id": 6,
+            "importance": 7, "access_count": 8, "decay_factor": 9,
+            "embedding_id": 11, "related_memory_ids": 12,
+            "tags": 13, "extra": 14, "created_at": 15, "last_accessed": 16,
+        }
+        frag = MemoryFragment(
+            id=row[col["id"]],
+            identity_id=row[col["identity_id"]],
+            content=row[col["content"]],
+            memory_type=MemoryType(row[col["memory_type"]]),
+            confidence=MemoryConfidence(row[col["confidence"]]),
+            source=row[col["source"]],
+            session_id=row[col["session_id"]],
+            importance=row[col["importance"]],
+            access_count=row[col["access_count"]],
+            decay_factor=row[col["decay_factor"]],
+            embedding_id=row[col["embedding_id"]],
+            related_memory_ids=json.loads(row[col["related_memory_ids"]]),
+            tags=json.loads(row[col["tags"]]),
+            extra=json.loads(row[col["extra"]]),
+        )
+        if row[col["created_at"]]:
+            frag.created_at = datetime.fromisoformat(row[col["created_at"]])
+        if row[col["last_accessed"]]:
+            frag.last_accessed = datetime.fromisoformat(row[col["last_accessed"]])
+        return frag
+
+    def get(self, fragment_id: str) -> Optional[MemoryFragment]:
+        conn = sqlite3.connect(self.db_path)
+        row = conn.execute(
+            "SELECT * FROM core_memories WHERE id = ?", (fragment_id,)
+        ).fetchone()
+        conn.close()
+        if row:
+            frag = self._row_to_fragment(row)
+            frag.touch()
+            self._fragments[frag.id] = frag
+            return frag
+        return super().get(fragment_id)
+
+    def remove(self, fragment_id: str) -> bool:
+        conn = sqlite3.connect(self.db_path)
+        conn.execute("DELETE FROM core_memories WHERE id = ?", (fragment_id,))
+        conn.commit()
+        conn.close()
+        return super().remove(fragment_id)
+
+    def all(self) -> List[MemoryFragment]:
+        conn = sqlite3.connect(self.db_path)
+        rows = conn.execute("SELECT * FROM core_memories").fetchall()
+        conn.close()
+        return [self._row_to_fragment(r) for r in rows]
+
+    def search(
+        self,
+        query: str,
+        identity_id: str = "",
+        top_k: int = 5,
+        threshold: float = 0.3,
+    ) -> List[MemorySearchResult]:
+        """Cosine-similarity search over embeddings."""
+        query_vec = _simple_embedding(query)
+        conn = sqlite3.connect(self.db_path)
+        if identity_id:
+            rows = conn.execute(
+                "SELECT * FROM core_memories WHERE identity_id = ?",
+                (identity_id,),
+            ).fetchall()
+        else:
+            rows = conn.execute("SELECT * FROM core_memories").fetchall()
+        conn.close()
+
+        scored: List[MemorySearchResult] = []
+        for row in rows:
+            try:
+                emb = json.loads(row[10]) if row[10] else _simple_embedding(row[2])
+                sim = _cosine_similarity(query_vec, emb)
+                if sim >= threshold:
+                    frag = self._row_to_fragment(row)
+                    scored.append(MemorySearchResult(fragment=frag, score=sim))
+            except Exception:
+                continue
+
+        scored.sort(key=lambda x: x.score, reverse=True)
+        return scored[:top_k]
+
+    def clear_identity(self, identity_id: str) -> int:
+        """Delete all memories for an identity. Returns count of deleted."""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.execute(
+            "DELETE FROM core_memories WHERE identity_id = ?", (identity_id,)
+        )
+        deleted = cursor.rowcount
+        conn.commit()
+        conn.close()
+        self._fragments = {
+            k: v for k, v in self._fragments.items() if v.identity_id != identity_id
+        }
+        return deleted

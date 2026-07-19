@@ -1,7 +1,11 @@
-"""Identity Loader
+"""
+DEPRECATED — runtime/identity_loader.py (kept for backward compat)
 
 Loads and validates identity specs from JSON files.
 Identities live in the /identities directory.
+
+New code should use core.identity.IdentityStore for in-memory management
+or direct JSON deserialization with IdentitySpec.from_dict().
 """
 
 import json
