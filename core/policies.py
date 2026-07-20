@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Callable, Dict, List, Optional
 
@@ -31,7 +31,7 @@ class PolicyViolation:
     effect: PolicyEffect
     reason: str
     input_data: Any = None
-    timestamp: datetime = field(default_factory=datetime.utcnow)
+    timestamp: datetime = field(default_factory=lambda: datetime.now(timezone.utc).replace(tzinfo=None))
 
 
 @dataclass
@@ -60,7 +60,7 @@ class Policy:
     condition: Optional[Callable[[Any], bool]] = field(default=None, repr=False)
     transformer: Optional[Callable[[Any], Any]] = field(default=None, repr=False)
     tags: List[str] = field(default_factory=list)
-    created_at: datetime = field(default_factory=datetime.utcnow)
+    created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc).replace(tzinfo=None))
     metadata: Dict[str, Any] = field(default_factory=dict)
 
     def evaluate(self, data: Any) -> Optional[PolicyViolation]:

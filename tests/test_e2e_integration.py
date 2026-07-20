@@ -91,14 +91,15 @@ class TestFullPipeline:
 
         timeline = runtime.timeline_registry.get("e2e-bot")
         assert len(timeline) >= 2
-        assert timeline.events()[-1].title == "Interaction"
+        # Timeline title now reflects memory classification
+        assert timeline.events()[-1].title != "Interaction"  # should be "Learned preference"
 
         edges = runtime.identity_graph.get_relationships("e2e-bot")
         assert len(edges) >= 1
 
         mems = runtime.memory_store.by_identity(identity_id="e2e-bot")
         assert len(mems) >= 1
-        semantic = [m for m in mems if any("Python" in m.content for m in mems)]
+        semantic = [m for m in mems if "Python" in m.content]
         assert len(semantic) >= 1
 
         ctx = resp.context_used

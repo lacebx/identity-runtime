@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from enum import Enum
 from typing import Any, Dict, List, Optional
 
@@ -62,12 +62,12 @@ class LifeEvent:
     description: str = ""
     significance: int = 3            # 1-5, how important was this
     linked_entity_id: Optional[str] = None  # related identity, skill, goal, etc.
-    occurred_at: datetime = field(default_factory=datetime.utcnow)
+    occurred_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc).replace(tzinfo=None))
     metadata: Dict[str, Any] = field(default_factory=dict)
 
     def age_label(self, relative_to: Optional[datetime] = None) -> str:
         """Human-readable age (e.g., '6 months ago', '2 years ago')."""
-        now = relative_to or datetime.utcnow()
+        now = relative_to or datetime.now(timezone.utc).replace(tzinfo=None)
         delta = now - self.occurred_at
         days = delta.days
         if days < 1:
@@ -101,7 +101,7 @@ class IdentityTimeline:
 
     def __init__(self, identity_id: str, created_at: Optional[datetime] = None):
         self.identity_id = identity_id
-        self.created_at = created_at or datetime.utcnow()
+        self.created_at = created_at or datetime.now(timezone.utc).replace(tzinfo=None)
         self._events: List[LifeEvent] = []
 
         # Record the creation event automatically
@@ -117,7 +117,7 @@ class IdentityTimeline:
     @property
     def age(self) -> timedelta:
         """How long this identity has existed."""
-        return datetime.utcnow() - self.created_at
+        return datetime.now(timezone.utc).replace(tzinfo=None) - self.created_at
 
     @property
     def age_label(self) -> str:
@@ -168,7 +168,7 @@ class IdentityTimeline:
         events = self.significant() or self.recent(limit)
         if not events:
             return ""
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
         lines = [f"## Timeline (Age: {self.age_label})"]
         for e in events[-limit:]:
             age = e.age_label(relative_to=now)

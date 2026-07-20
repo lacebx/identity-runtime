@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Dict, List, Optional
 
@@ -65,7 +65,7 @@ class Experience:
     raw_content: str = ""       # Original text (e.g., conversation transcript)
     tags: List[str] = field(default_factory=list)
     session_id: Optional[str] = None
-    occurred_at: datetime = field(default_factory=datetime.utcnow)
+    occurred_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc).replace(tzinfo=None))
     metadata: Dict[str, Any] = field(default_factory=dict)
 
     def is_formative(self) -> bool:

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Dict, List, Optional
 
@@ -40,7 +40,7 @@ class Milestone:
 
     def complete(self) -> None:
         self.completed = True
-        self.completed_at = datetime.utcnow()
+        self.completed_at = datetime.now(timezone.utc).replace(tzinfo=None)
 
 
 @dataclass
@@ -62,8 +62,8 @@ class Goal:
     required_knowledge: List[str] = field(default_factory=list) # pack IDs
     success_criteria: str = ""
     progress: float = 0.0    # 0.0 to 1.0
-    created_at: datetime = field(default_factory=datetime.utcnow)
-    updated_at: datetime = field(default_factory=datetime.utcnow)
+    created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc).replace(tzinfo=None))
+    updated_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc).replace(tzinfo=None))
     deadline: Optional[datetime] = None
     tags: List[str] = field(default_factory=list)
     metadata: Dict[str, Any] = field(default_factory=dict)
@@ -90,18 +90,18 @@ class Goal:
         self.progress = done / len(self.milestones)
         if self.progress >= 1.0:
             self.status = GoalStatus.COMPLETED
-        self.updated_at = datetime.utcnow()
+        self.updated_at = datetime.now(timezone.utc).replace(tzinfo=None)
 
     def mark_completed(self) -> None:
         self.status = GoalStatus.COMPLETED
         self.progress = 1.0
-        self.updated_at = datetime.utcnow()
+        self.updated_at = datetime.now(timezone.utc).replace(tzinfo=None)
 
     def block(self, reason: str = "") -> None:
         self.status = GoalStatus.BLOCKED
         if reason:
             self.metadata["block_reason"] = reason
-        self.updated_at = datetime.utcnow()
+        self.updated_at = datetime.now(timezone.utc).replace(tzinfo=None)
 
     def is_active(self) -> bool:
         return self.status == GoalStatus.ACTIVE

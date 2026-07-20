@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Callable, Dict, List, Optional
 
@@ -62,7 +62,7 @@ class Skill:
     handler: Optional[Callable] = field(default=None, repr=False)
     usage_count: int = 0
     last_used: Optional[datetime] = None
-    created_at: datetime = field(default_factory=datetime.utcnow)
+    created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc).replace(tzinfo=None))
     metadata: Dict[str, Any] = field(default_factory=dict)
 
     def invoke(self, **kwargs) -> SkillResult:
@@ -81,12 +81,12 @@ class Skill:
                 output=None,
                 error=f"Skill '{self.name}' has no handler registered."
             )
-        start = datetime.utcnow()
+        start = datetime.now(timezone.utc).replace(tzinfo=None)
         try:
             result = self.handler(**kwargs)
-            elapsed = (datetime.utcnow() - start).total_seconds() * 1000
+            elapsed = (datetime.now(timezone.utc).replace(tzinfo=None) - start).total_seconds() * 1000
             self.usage_count += 1
-            self.last_used = datetime.utcnow()
+            self.last_used = datetime.now(timezone.utc).replace(tzinfo=None)
             return SkillResult(
                 skill_id=self.id,
                 success=True,
@@ -94,7 +94,7 @@ class Skill:
                 execution_time_ms=elapsed
             )
         except Exception as e:
-            elapsed = (datetime.utcnow() - start).total_seconds() * 1000
+            elapsed = (datetime.now(timezone.utc).replace(tzinfo=None) - start).total_seconds() * 1000
             return SkillResult(
                 skill_id=self.id,
                 success=False,

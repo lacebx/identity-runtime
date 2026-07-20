@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Callable, Dict, List, Optional
 
@@ -63,8 +63,8 @@ class EvalRecord:
     notes: str = ""
     input_snapshot: Any = None
     output_snapshot: Any = None
-    evaluated_at: datetime = field(default_factory=datetime.utcnow)
-    metadata: Dict[str, Any] = field(default_factory=dict)
+    evaluated_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc).replace(tzinfo=None))
+
 
 
 @dataclass
@@ -75,7 +75,7 @@ class EvalReport:
     records: List[EvalRecord] = field(default_factory=list)
     overall_score: float = 0.0
     passed: bool = True
-    generated_at: datetime = field(default_factory=datetime.utcnow)
+    generated_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc).replace(tzinfo=None))
 
     def summarize(self) -> str:
         lines = [
