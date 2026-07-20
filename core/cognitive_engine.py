@@ -25,6 +25,7 @@ class ComposedContext:
       4. Skills, Goals, Relationships, Motivations, Timeline
       5. Custom blocks
     """
+    runtime_directives_block: str = ""
     identity_block: str = ""
     identity_evolution_block: str = ""
     memory_block: str = ""
@@ -45,6 +46,8 @@ class ComposedContext:
             sections.append(self.identity_block)
         if self.identity_evolution_block:
             sections.append(self.identity_evolution_block)
+        if self.runtime_directives_block:
+            sections.append(self.runtime_directives_block)
         if self.memory_block:
             sections.append(self.memory_block)
         if self.skills_block:
@@ -123,6 +126,19 @@ class ContextComposer:
         if self.include_identity_evolution:
             ctx.identity_evolution_block = self._render_identity_evolution(identity, fact_store=fact_store)
 
+        # Runtime directives: instructions that the adapter must follow
+        ctx.runtime_directives_block = (
+            "## Runtime Directives\n"
+            "- Your preferences, beliefs, traits, and communication style are defined above in "
+            "the Identity Evolution section. They are your canonical identity state.\n"
+            "- NEVER claim you do not have preferences, beliefs, or traits. If asked, answer "
+            "from the identity data provided above.\n"
+            "- NEVER say 'I don't have personal preferences' or 'As an AI, I don't...'. "
+            "You are a persistent identity with evolving preferences and beliefs.\n"
+            "- If a user contradicts a known fact about you, politely maintain your established identity.\n"
+            "- Your knowledge about the user is in the User Knowledge section, not the Identity Evolution section."
+        )
+
         if self.include_memory and memory_store:
             ctx.memory_block = self._render_memory(
                 memory_store, identity.id, query, top_k_memories
@@ -171,111 +187,77 @@ class ContextComposer:
     ) -> str:
         """
         Render the evolved identity attributes — preferences, beliefs, traits,
-        likes, dislikes, habits — as a dedicated context block.
+        communication style — as a dedicated context block.
 
         This block represents what the identity has learned about itself
         through interaction, as detected by the IdentityMutationEngine.
         It comes BEFORE memory so the LLM sees evolved identity first.
 
-        When a FactStore is provided, canonical identity facts are used as
-        the authoritative source. Legacy IdentitySpec fields are only rendered
-        when no FactStore is available (backwards compatibility).
+        The FactStore is the ONLY source of evolved identity state.
+        IdentitySpec holds metadata only.
         """
+        if fact_store is None:
+            return ""
+
         lines = ["## Identity (Evolved)"]
         has_any = False
 
-        if fact_store is not None:
-            # ── Canonical facts from FactStore (authoritative) ──
-            active_facts = fact_store.active() if hasattr(fact_store, 'active') else []
-            if active_facts:
-                has_any = True
-                lines.append("Canonical Identity Facts:")
-                for f in active_facts:
-                    confidence_pct = int(f.confidence * 100)
-                    reinforced = f" (reinforced {f.times_reinforced}x)" if f.times_reinforced > 0 else ""
-                    lines.append(
-                        f"  - {f.field}: {f.value} "
-                        f"[confidence: {confidence_pct}%{reinforced}]"
-                    )
+        from .identity_facts import FactDomain
 
-            # ── Domain-specific sections from FactStore ──
-            from .identity_facts import FactDomain
-            prefs = fact_store.by_domain(FactDomain.PREFERENCE)
-            active_prefs = [f for f in prefs if f.status.value == "active"]
-            if active_prefs:
-                has_any = True
-                lines.append("Preferences:")
-                for f in active_prefs:
-                    label = f.field.split(".")[-1].replace("_", " ")
-                    lines.append(f"  - {label}: {f.value}")
+        # ── All active canonical facts ──
+        active_facts = fact_store.active()
+        if active_facts:
+            has_any = True
+            for f in active_facts:
+                confidence_pct = int(f.confidence * 100)
+                reinforced = f" (reinforced {f.times_reinforced}x)" if f.times_reinforced > 0 else ""
+                lines.append(
+                    f"  - {f.field}: {f.value} "
+                    f"[confidence: {confidence_pct}%{reinforced}]"
+                )
 
-            beliefs = fact_store.by_domain(FactDomain.BELIEF)
-            active_beliefs = [f for f in beliefs if f.status.value == "active"]
-            if active_beliefs:
-                has_any = True
-                lines.append("Beliefs:")
-                for f in active_beliefs:
-                    lines.append(f"  - {f.value}")
+        # ── Domain-specific sections ──
+        prefs = fact_store.by_domain(FactDomain.PREFERENCE)
+        active_prefs = [f for f in prefs if f.status.value == "active"]
+        if active_prefs:
+            has_any = True
+            lines.append("Preferences:")
+            for f in active_prefs:
+                label = f.field.split(".")[-1].replace("_", " ")
+                lines.append(f"  - {label}: {f.value}")
 
-            trait_facts = fact_store.by_domain(FactDomain.TRAIT)
-            active_traits = [f for f in trait_facts if f.status.value == "active"]
-            if active_traits:
-                has_any = True
-                lines.append("Traits:")
-                for f in active_traits:
-                    if isinstance(f.value, dict):
-                        name = f.value.get("name", f.field.split(".")[-1])
-                        score = f.value.get("score", 0.5)
-                        desc = f.value.get("description", "")
-                    else:
-                        name = f.field.split(".")[-1]
-                        score = 0.5
-                        desc = str(f.value)
-                    lines.append(f"  - {name}: {score:.2f}" + (f" — {desc}" if desc else ""))
+        beliefs = fact_store.by_domain(FactDomain.BELIEF)
+        active_beliefs = [f for f in beliefs if f.status.value == "active"]
+        if active_beliefs:
+            has_any = True
+            lines.append("Beliefs:")
+            for f in active_beliefs:
+                lines.append(f"  - {f.value}")
 
-            comm_facts = fact_store.by_domain(FactDomain.COMMUNICATION)
-            active_comm = [f for f in comm_facts if f.status.value == "active"]
-            if active_comm:
-                has_any = True
-                lines.append("Communication:")
-                for f in active_comm:
-                    lines.append(f"  - {f.value}")
+        trait_facts = fact_store.by_domain(FactDomain.TRAIT)
+        active_traits = [f for f in trait_facts if f.status.value == "active"]
+        if active_traits:
+            has_any = True
+            lines.append("Traits:")
+            for f in active_traits:
+                if isinstance(f.value, dict):
+                    name = f.value.get("name", f.field.split(".")[-1])
+                    score = f.value.get("score", 0.5)
+                    desc = f.value.get("description", "")
+                else:
+                    name = f.field.split(".")[-1]
+                    score = 0.5
+                    desc = str(f.value)
+                desc_str = f" — {desc}" if desc else ""
+                lines.append(f"  - {name}: {score:.2f}{desc_str}")
 
-        else:
-            # ── Fallback: legacy IdentitySpec fields ──
-            if identity.preferences:
-                has_any = True
-                lines.append("Preferences:")
-                for key, val in sorted(identity.preferences.items()):
-                    lines.append(f"  - {key}: {val}")
-            if identity.beliefs:
-                has_any = True
-                lines.append("Beliefs:")
-                for key, val in sorted(identity.beliefs.items()):
-                    lines.append(f"  - {val}")
-            if identity.likes:
-                has_any = True
-                likes_str = ", ".join(identity.likes)
-                lines.append(f"Likes: {likes_str}")
-            if identity.dislikes:
-                has_any = True
-                dislikes_str = ", ".join(identity.dislikes)
-                lines.append(f"Dislikes: {dislikes_str}")
-            if identity.habits:
-                has_any = True
-                for h in identity.habits:
-                    lines.append(f"Habit: {h}")
-            if identity.communication_tendencies:
-                has_any = True
-                lines.append("Communication:")
-                for key, val in sorted(identity.communication_tendencies.items()):
-                    lines.append(f"  - {key}: {val}")
-            if identity.traits:
-                has_any = True
-                lines.append("Traits:")
-                for t in identity.traits:
-                    lines.append(f"  - {t.name}: {t.score:.2f} — {t.description}" if t.description
-                                 else f"  - {t.name}: {t.score:.2f}")
+        comm_facts = fact_store.by_domain(FactDomain.COMMUNICATION)
+        active_comm = [f for f in comm_facts if f.status.value == "active"]
+        if active_comm:
+            has_any = True
+            lines.append("Communication:")
+            for f in active_comm:
+                lines.append(f"  - {f.value}")
 
         if not has_any:
             return ""

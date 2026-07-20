@@ -17,9 +17,7 @@ from core.identity_facts import FactStore
 from core.identity_mutation import (
     IdentityMutationEngine,
     MutationProposal,
-    MutationRecord,
     MutationStatus,
-    MutationType,
 )
 from core.memory import MemoryFragment, MemoryStore, MemoryType
 from core.motivations import MotivationEngine
@@ -360,61 +358,69 @@ class IdentityRuntime:
         except Exception:
             pass
 
-    def _apply_mutation(
-        self, identity: IdentitySpec, proposal: MutationProposal
-    ) -> None:
+    def _migrate_legacy_fields_to_fact_store(
+        self, identity: IdentitySpec, fact_store: FactStore,
+    ) -> int:
         """
-        Apply an accepted mutation to the identity spec.
-        Supports dotted field paths.
-        """
-        field = proposal.field
-        value = proposal.new_value
+        One-time migration: copy any data from legacy IdentitySpec fields
+        (preferences, beliefs, mutation_history, etc.) into the FactStore.
 
-        # Trait mutations: update via Trait dataclass
-        if field.startswith("traits."):
-            trait_name = field.split(".", 1)[1]
-            current = identity.get_trait(trait_name)
-            if isinstance(value, dict) and "score" in value:
-                if current:
-                    delta = value["score"] - current.score
-                    current.update(delta, reason=proposal.reason)
-                else:
-                    from core.identity import Trait
-                    new_trait = Trait(
-                        name=trait_name,
-                        score=value["score"],
-                        description=value.get("description", ""),
+        This ensures old identities loaded from disk aren't silently orphaned.
+        Returns the number of facts migrated.
+        """
+        migrated = 0
+        # Legacy snapshot may have had a 'preferences' dict embedded in the
+        # identity spec data. We check via storage directly.
+        if not self._storage:
+            return 0
+        try:
+            raw = self._storage.load(identity.id, "identity_spec")
+            if not raw:
+                raw = self._storage.load_latest(identity.id)
+            if not raw:
+                return 0
+            if isinstance(raw, dict) and "modules" in raw:
+                raw = raw["modules"].get("identity", raw)
+            from core.identity_facts import FactSource
+
+            legacy_prefs = raw.get("preferences", {}) if isinstance(raw, dict) else {}
+            for key, value in legacy_prefs.items():
+                field = f"preferences.{key}"
+                if not fact_store.find(field):
+                    fact_store.merge_or_reinforce(
+                        field=field, value=value, confidence=0.7,
+                        reasons=["Migrated from legacy identity spec"],
+                        source=FactSource.IMPORTED,
                     )
-                    identity.traits.append(new_trait)
-            return
+                    migrated += 1
 
-        # Communication style
-        if field == "communication_style":
-            identity.communication_style = str(value)
-            return
+            legacy_beliefs = raw.get("beliefs", {}) if isinstance(raw, dict) else {}
+            for key, value in legacy_beliefs.items():
+                field = f"beliefs.{key}"
+                if not fact_store.find(field):
+                    fact_store.merge_or_reinforce(
+                        field=field, value=value, confidence=0.7,
+                        reasons=["Migrated from legacy identity spec"],
+                        source=FactSource.IMPORTED,
+                    )
+                    migrated += 1
 
-        # Preferences: dotted path like "preferences.favorite_color"
-        if field.startswith("preferences."):
-            key = field.split(".", 1)[1]
-            identity.preferences[key] = value
-            return
-
-        # Beliefs: dotted path like "beliefs.growth_from_struggle"
-        if field.startswith("beliefs."):
-            key = field.split(".", 1)[1]
-            identity.beliefs[key] = value
-            return
-
-        # Relationship trust
-        if field.startswith("relationships.trust."):
-            target = field.split(".", 2)[2]
-            if "trust" not in identity.extra:
-                identity.extra["trust"] = {}
-            identity.extra["trust"][target] = value
-            return
-
-        # Fallback: store in preferences
-        identity.preferences[field] = value
+            legacy_traits = raw.get("traits", []) if isinstance(raw, dict) else []
+            for t_data in legacy_traits:
+                name = t_data.get("name", "unknown")
+                score = t_data.get("score", 0.5)
+                desc = t_data.get("description", "")
+                field = f"traits.{name}"
+                if not fact_store.find(field):
+                    fact_store.merge_or_reinforce(
+                        field=field, value={"score": score, "description": desc},
+                        confidence=0.7, reasons=["Migrated from legacy traits"],
+                        source=FactSource.IMPORTED,
+                    )
+                    migrated += 1
+        except Exception:
+            pass
+        return migrated
 
     def _load_goals(self, identity_id: str) -> None:
         if not self._storage:
@@ -449,7 +455,9 @@ class IdentityRuntime:
             pass
 
     def _load_fact_store(self, identity_id: str) -> None:
-        """Load the FactStore for an identity from storage."""
+        """Load the FactStore for an identity from storage.
+        Also runs one-time migration from legacy IdentitySpec fields.
+        """
         if not self._storage:
             self._fact_stores[identity_id] = FactStore()
             return
@@ -461,6 +469,14 @@ class IdentityRuntime:
                 self._fact_stores[identity_id] = FactStore()
         except Exception:
             self._fact_stores[identity_id] = FactStore()
+
+        # One-time migration from legacy fields
+        identity = self.identity_store.get(identity_id)
+        store = self._fact_stores.get(identity_id)
+        if identity and store and len(store) == 0:
+            migrated = self._migrate_legacy_fields_to_fact_store(identity, store)
+            if migrated > 0:
+                self._save_fact_store(identity_id)
 
     def _save_fact_store(self, identity_id: str) -> None:
         """Persist the FactStore for an identity."""
@@ -595,9 +611,10 @@ class IdentityRuntime:
             pass
 
         # Runtime stats
+        event_log_count = len(fact_store.replay()) if fact_store else 0
         runtime_stats = {
             "interaction_count": len(self.mutation_engine.proposal_history()),
-            "mutation_history_count": len(identity.mutation_history),
+            "mutation_history_count": event_log_count,
             "fact_count": len(all_facts),
             "active_fact_count": len(active_facts),
             "timeline_event_count": len(timeline_events),
@@ -1003,51 +1020,19 @@ class IdentityRuntime:
         )
 
         if mutation_proposals:
-            existing = [
-                MutationRecord(**m) if isinstance(m, dict) else m
-                for m in identity.mutation_history
-            ]
+            # Validate against FactStore (the ONLY canonical source)
             validated = self.mutation_engine.validate(
                 mutation_proposals,
-                existing_records=existing,
+                existing_records=None,
             )
+
+            # Apply ALL validated proposals to FactStore (canonical identity facts)
+            # Accepted proposals become active facts; rejected/conflict proposals
+            # are still recorded in the FactStore event log via the mutation engine.
+            self.mutation_engine.apply_proposals_to_fact_store(validated)
 
             for proposal in validated:
                 if proposal.status in (MutationStatus.ACCEPTED, MutationStatus.CONFLICT):
-                    record = MutationRecord(
-                        mutation_id=proposal.mutation_id,
-                        mutation_type=proposal.mutation_type,
-                        field=proposal.field,
-                        old_value=proposal.old_value,
-                        new_value=proposal.new_value,
-                        confidence=proposal.confidence,
-                        reason=proposal.reason,
-                        source_text=proposal.source_text,
-                        status=proposal.status,
-                        applied_at=datetime.now(timezone.utc).isoformat(),
-                        rejection_reason=proposal.rejection_reason,
-                        resolved_conflict=(proposal.status == MutationStatus.CONFLICT),
-                    )
-                    history_entry = {
-                        "mutation_id": record.mutation_id,
-                        "mutation_type": record.mutation_type.value,
-                        "field": record.field,
-                        "old_value": record.old_value,
-                        "new_value": record.new_value,
-                        "confidence": record.confidence,
-                        "reason": record.reason,
-                        "source_text": record.source_text,
-                        "status": record.status.value,
-                        "applied_at": record.applied_at,
-                        "rejection_reason": record.rejection_reason,
-                        "resolved_conflict": record.resolved_conflict,
-                    }
-                    identity.mutation_history.append(history_entry)
-
-                    # Apply accepted mutations to identity spec
-                    if proposal.status == MutationStatus.ACCEPTED:
-                        self._apply_mutation(identity, proposal)
-
                     self._emit(
                         EventType.IDENTITY_MUTATION_ACCEPTED
                         if proposal.status == MutationStatus.ACCEPTED
@@ -1069,13 +1054,9 @@ class IdentityRuntime:
                         reason=proposal.rejection_reason,
                     )
 
-            # Apply accepted proposals to the FactStore (canonical identity facts)
-            self.mutation_engine.apply_proposals_to_fact_store(validated)
-
-            # Persist the updated identity spec and fact store
-            self._persist_identity(identity)
+            # Persist the fact store (IdentitySpec is metadata-only)
             self._save_fact_store(identity.id)
-            identity.bump_version("patch", changelog=f"{len(validated)} mutation(s) applied")
+            self._persist_identity(identity)
 
         # Determine timeline title from semantic classification
         tl_title = "Interaction"

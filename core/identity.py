@@ -164,17 +164,6 @@ class IdentitySpec:
     # ── Version history ──────────────────────────────────────────────────────
     version_history: List[IdentityVersion] = field(default_factory=list)
 
-    # ── Evolved identity fields (updated by IdentityMutationEngine) ──────────
-    preferences: Dict[str, Any] = field(default_factory=dict)
-    beliefs: Dict[str, Any] = field(default_factory=dict)
-    likes: List[str] = field(default_factory=list)
-    dislikes: List[str] = field(default_factory=list)
-    habits: List[str] = field(default_factory=list)
-    communication_tendencies: Dict[str, Any] = field(default_factory=dict)
-
-    # ── Mutation audit trail ──────────────────────────────────────────────────
-    mutation_history: List[Dict[str, Any]] = field(default_factory=list)
-
     # ── Evaluation baseline ──────────────────────────────────────────────────
     # Set by the Evaluation module after first comprehensive eval
     fidelity_baseline: Optional[float] = None
@@ -260,44 +249,21 @@ class IdentitySpec:
         return None
 
     # ── FactStore-backed query methods ──────────────────────────────────
-    # These query the canonical FactStore when available, falling back to
-    # legacy IdentitySpec fields for backwards compatibility.
+    # These query the canonical FactStore. The FactStore is the ONLY source
+    # of evolved identity state. IdentitySpec holds metadata only.
 
     def get_facts(
-        self, field: str = "", fact_store: Optional["FactStore"] = None,
+        self, fact_store: Optional["FactStore"] = None,
     ) -> List["IdentityFact"]:
-        """Return all canonical facts, optionally filtered by field."""
+        """Return all canonical facts from the FactStore."""
         if fact_store is not None:
-            if field:
-                return fact_store.by_field(field)
             return fact_store.all()
         return []
-
-    def get_preferences(
-        self, fact_store: Optional["FactStore"] = None,
-    ) -> Dict[str, Any]:
-        """Return preferences, preferring FactStore canonical facts."""
-        if fact_store is not None:
-            active = [f for f in fact_store.by_domain(FactDomain.PREFERENCE)
-                      if f.status == FactStatus.ACTIVE]
-            if active:
-                return {f.field.split(".")[-1]: f.value for f in active}
-        return dict(self.preferences)
-
-    def get_beliefs(
-        self, fact_store: Optional["FactStore"] = None,
-    ) -> Dict[str, Any]:
-        if fact_store is not None:
-            active = [f for f in fact_store.by_domain(FactDomain.BELIEF)
-                      if f.status == FactStatus.ACTIVE]
-            if active:
-                return {f.field.split(".")[-1]: f.value for f in active}
-        return dict(self.beliefs)
 
     def get_traits_from_facts(
         self, fact_store: Optional["FactStore"] = None,
     ) -> List[Dict[str, Any]]:
-        """Return canonical trait facts as structured dicts."""
+        """Return canonical trait facts from the FactStore."""
         if fact_store is not None:
             trait_facts = [f for f in fact_store.by_domain(FactDomain.TRAIT)
                            if f.status == FactStatus.ACTIVE]
@@ -309,8 +275,7 @@ class IdentitySpec:
                     {"name": f.field.split(".")[-1], "score": 0.5, "description": str(f.value)}
                     for f in trait_facts
                 ]
-        return [{"name": t.name, "score": t.score, "description": t.description}
-                for t in self.traits]
+        return []
 
     def explain_fact(
         self, field: str, fact_store: Optional["FactStore"] = None,
@@ -379,13 +344,6 @@ class IdentitySpec:
             "preferred_adapter": self.preferred_adapter,
             "preferred_model": self.preferred_model,
             "adapter_overrides": self.adapter_overrides,
-            "preferences": self.preferences,
-            "beliefs": self.beliefs,
-            "likes": self.likes,
-            "dislikes": self.dislikes,
-            "habits": self.habits,
-            "communication_tendencies": self.communication_tendencies,
-            "mutation_history": self.mutation_history,
             "fidelity_baseline": self.fidelity_baseline,
             "tags": self.tags,
             "extra": self.extra,
@@ -393,7 +351,10 @@ class IdentitySpec:
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "IdentitySpec":
-        """Deserialize from a plain dict."""
+        """Deserialize from a plain dict.
+        Legacy evolved fields (preferences, beliefs, mutation_history, etc.)
+        are silently absorbed — they are no longer stored on IdentitySpec.
+        """
         core_values = [
             CoreValue(
                 name=cv["name"],
@@ -444,13 +405,6 @@ class IdentitySpec:
             preferred_adapter=data.get("preferred_adapter", "openai"),
             preferred_model=data.get("preferred_model", "gpt-4o"),
             adapter_overrides=data.get("adapter_overrides", {}),
-            preferences=data.get("preferences", {}),
-            beliefs=data.get("beliefs", {}),
-            likes=data.get("likes", []),
-            dislikes=data.get("dislikes", []),
-            habits=data.get("habits", []),
-            communication_tendencies=data.get("communication_tendencies", {}),
-            mutation_history=data.get("mutation_history", []),
             fidelity_baseline=data.get("fidelity_baseline"),
             tags=data.get("tags", []),
             extra=data.get("extra", {}),

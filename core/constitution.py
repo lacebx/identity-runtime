@@ -101,34 +101,26 @@ def build_constitution(
                     lines.append(f"  - {f.value}")
             lines.append("")
 
-    # Traits — prefer FactStore canonical traits, fall back to IdentitySpec
-    trait_facts: List[IdentityFact] = []
+    # Traits — ONLY from FactStore (canonical source)
     if fact_store:
         trait_facts = [f for f in fact_store.by_domain(FactDomain.TRAIT)
                        if f.status == FactStatus.ACTIVE]
-    if trait_facts:
-        lines.append("## Traits")
-        for f in sorted(trait_facts, key=lambda x: x.confidence, reverse=True):
-            val = f.value
-            if isinstance(val, dict):
-                name = val.get("name", f.field.split(".")[-1])
-                score = val.get("score", 0.5)
-                desc = val.get("description", "")
-            else:
-                name = f.field.split(".")[-1]
-                score = 0.5
-                desc = str(val)
-            bar = _score_bar(score)
-            detail = f" — {desc}" if desc else ""
-            lines.append(f"  {name}: {bar} ({score:.2f}){detail}")
-        lines.append("")
-    elif identity.traits:
-        lines.append("## Traits")
-        for t in sorted(identity.traits, key=lambda x: x.score, reverse=True):
-            bar = _score_bar(t.score)
-            desc = f" — {t.description}" if t.description else ""
-            lines.append(f"  {t.name}: {bar} ({t.score:.2f}){desc}")
-        lines.append("")
+        if trait_facts:
+            lines.append("## Traits")
+            for f in sorted(trait_facts, key=lambda x: x.confidence, reverse=True):
+                val = f.value
+                if isinstance(val, dict):
+                    name = val.get("name", f.field.split(".")[-1])
+                    score = val.get("score", 0.5)
+                    desc = val.get("description", "")
+                else:
+                    name = f.field.split(".")[-1]
+                    score = 0.5
+                    desc = str(val)
+                bar = _score_bar(score)
+                detail = f" — {desc}" if desc else ""
+                lines.append(f"  {name}: {bar} ({score:.2f}){detail}")
+            lines.append("")
 
     # Communication Style
     if identity.communication_style:
@@ -231,15 +223,13 @@ def _compute_stability(identity: IdentitySpec,
     age_hours = (datetime.now(timezone.utc) - identity.created_at).total_seconds() / 3600
     scores.append(min(10, age_hours / 24 * 2))
 
-    # Trait variance (lower = more stable, contributes up to 10)
+    # Trait variance from FactStore (lower = more stable, contributes up to 10)
     trait_scores = []
     if fact_store:
         trait_facts = fact_store.by_domain(FactDomain.TRAIT)
         for f in trait_facts:
             if isinstance(f.value, dict) and "score" in f.value:
                 trait_scores.append(float(f.value["score"]))
-    if not trait_scores:
-        trait_scores = [t.score for t in identity.traits]
     if trait_scores:
         mean = sum(trait_scores) / len(trait_scores)
         variance = sum((s - mean) ** 2 for s in trait_scores) / len(trait_scores)

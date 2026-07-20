@@ -89,37 +89,21 @@ validated = engine.validate(proposals, existing_records=existing)
 accepted = [p for p in validated if p.status.value == "accepted"]
 log(f"{len(accepted)} accepted, {len(validated) - len(accepted)} rejected/conflicted")
 
-# Apply mutations
-from runtime.orchestrator import MutationStatus
-for p in accepted:
-    rt._apply_mutation(identity, p)
-    # Record in history
-    identity.mutation_history.append({
-        "mutation_id": p.mutation_id,
-        "mutation_type": p.mutation_type.value,
-        "field": p.field,
-        "old_value": p.old_value,
-        "new_value": p.new_value,
-        "confidence": p.confidence,
-        "reason": p.reason,
-        "source_text": p.source_text,
-        "status": "accepted",
-        "applied_at": p.proposed_at,
-    })
-    rt._persist_identity(identity)
-
-# Also apply to FactStore (as the orchestrator would do in Stage 7c)
+# Apply mutations to FactStore ONLY (canonical source)
 engine.apply_proposals_to_fact_store(accepted)
-# Save FactStore to storage (as orchestrator would)
+# Save FactStore to storage
 rt._fact_stores["evolver"] = engine.fact_store
 rt._save_fact_store("evolver")
 
 log("Identity after mutation application:")
 print(json.dumps(identity.to_dict(), indent=2, default=str)[:800])
 
-# Verify preference was stored
-assert "favorite_color" in identity.preferences, "Should have favorite_color in preferences"
-assert identity.preferences["favorite_color"] == "blue", "Should be 'blue'"
+# Verify preference was stored in FactStore (NOT in IdentitySpec — it's metadata only)
+color_fact = engine.get_fact_by_field("preferences.favorite_color")
+assert color_fact is not None, "Should have canonical fact for favorite_color"
+assert color_fact.value == "blue", f"Fact value should be 'blue', got: {color_fact.value}"
+assert color_fact.confidence > 0, "Confidence should be > 0"
+log(f"Canonical fact verified: {color_fact.field} = {color_fact.value} (confidence={color_fact.confidence:.2f})")
 
 # ── Phase 3: Context includes evolution info ───────────────────────────
 
@@ -138,7 +122,7 @@ log("Composed context:", rendered[:1200])
 # Verify evolution block appears before memory
 assert "Identity (Evolved)" in rendered, "Evolved identity block should appear"
 assert "preferences" in rendered.lower() or "favorite_color" in rendered, "Preferences should be in context"
-assert "Canonical Identity Facts" in rendered, "Canonical Identity Facts should appear in context"
+assert "preferences.favorite_color" in rendered, "Canonical fact should appear in context"
 # Check order: identity block first, then evolution, then memory
 identity_pos = rendered.find("Identity: Evolver")
 evolution_pos = rendered.find("Identity (Evolved)")
@@ -157,32 +141,16 @@ proposals2 = engine.analyze(
     identity_spec=identity,
 )
 
-existing_records = [
-    {
-        "mutation_id": p.mutation_id,
-        "mutation_type": p.mutation_type.value,
-        "field": p.field,
-        "old_value": p.old_value,
-        "new_value": p.new_value,
-        "confidence": p.confidence,
-        "reason": p.reason,
-        "source_text": p.source_text,
-        "status": "accepted",
-        "applied_at": p.proposed_at,
-    }
-    for p in accepted
-]
-from core.identity_mutation import MutationRecord, MutationStatus as RecordStatus
-existing = [MutationRecord(**m) for m in identity.mutation_history]
+from core.identity_mutation import MutationStatus as RecordStatus
 
-validated2 = engine.validate(proposals2, existing_records=existing)
+# Validate against FactStore (the canonical source — no mutation_records needed)
+validated2 = engine.validate(proposals2, existing_records=None)
 conflicted = [p for p in validated2 if p.status == RecordStatus.CONFLICT]
 rejected = [p for p in validated2 if p.status == RecordStatus.REJECTED]
+accepted2 = [p for p in validated2 if p.status == RecordStatus.ACCEPTED]
 
-# Even if not detected as CONFLICT (because both use same old/new = None),
-# the engine now also checks the FactStore for contradictions
 log(f"Contradiction check: {len(conflicted)} conflict(s), {len(rejected)} rejected, "
-    f"{len(validated2) - len(conflicted) - len(rejected)} accepted")
+    f"{len(accepted2)} accepted")
 for p in validated2:
     print(f"  {p.status.value}: {p.field} = {p.new_value}")
     if p.rejection_reason:
@@ -208,11 +176,18 @@ log(f"Restarted runtime: loaded {loaded_count} identities")
 restored = rt2.identity_store.get("evolver")
 assert restored is not None, "evolver should be loaded after restart"
 
-log("Restored identity preferences:", json.dumps(restored.preferences, indent=2))
-log("Restored mutation history count:", str(len(restored.mutation_history)))
+# After restart, identity should have no legacy preferences (metadata only)
+log("Identity metadata verification:")
+print(f"  Name: {restored.name}")
+print(f"  ID: {restored.id}")
 
-assert restored.preferences.get("favorite_color") == "blue", \
-    f"Favorite color should survive restart. Got: {restored.preferences}"
+# FactStore should have the canonical fact after restart
+restored_fact_store = rt2._fact_stores.get("evolver")
+assert restored_fact_store is not None, "FactStore should exist after restart"
+restored_fact = restored_fact_store.find("preferences.favorite_color")
+assert restored_fact is not None, "Favorite color fact should survive restart"
+assert restored_fact.value == "blue", f"Fact value should be 'blue', got: {restored_fact.value}"
+log(f"After restart: FactStore has canonical fact '{restored_fact.field}' = '{restored_fact.value}'")
 
 # ── Phase 6: Timeline events ───────────────────────────────────────────
 
@@ -257,21 +232,20 @@ print()
 
 # After mutation has been applied, the context should contain the preference
 # so the LLM (if connected) would naturally answer correctly.
-# Even without an LLM, we can verify the runtime state:
-pref = restored.preferences.get("favorite_color", "unknown")
-print(f"Runtime answer: \"My favorite color is {pref}.\"")
-assert pref == "blue", f"Runtime should know favorite color is blue, got: {pref}"
+# Even without an LLM, we can verify the runtime state via canonical facts:
+restored_fact = rt2._fact_stores["evolver"].find("preferences.favorite_color")
+assert restored_fact is not None, "Runtime should have canonical fact for favorite_color"
+print(f"Runtime answer: \"My favorite color is {restored_fact.value}.\"")
+assert restored_fact.value == "blue", f"Runtime should know favorite color is blue, got: {restored_fact.value}"
 
 print()
 print("User: \"When did you decide that?\"")
 print()
 
-# Check mutation history for the reason
-if restored.mutation_history:
-    last = restored.mutation_history[-1]
-    print(f"Runtime answer: \"{last.get('reason', '')}\"")
-    print(f"  (from mutation {last.get('mutation_id', '')[:8]} at {last.get('applied_at', '')})")
-    assert "blue" in str(last.get('new_value', '')), "Mutation should reference blue"
+# Check canonical fact reasons and event log
+print(f"Runtime answer: \"I decided because: {restored_fact.reasons[0] if restored_fact.reasons else 'unknown'}\"")
+print(f"  (confidence={restored_fact.confidence:.2f}, first_seen={restored_fact.first_seen})")
+assert "blue" in str(restored_fact.value).lower(), "Fact should reference blue"
 
 # ── Phase 9: FactStore canonical identity facts ────────────────────────
 
@@ -309,8 +283,8 @@ assert fav_fact is not None, "Favorite color fact should survive restart"
 assert fav_fact.value == "blue", "Fact value should survive restart"
 
 # Verify canonical facts appear in context after restart
-assert "Canonical Identity Facts" in rendered2, \
-    "Canonical Identity Facts section should appear in context"
+assert "preferences.favorite_color" in rendered2, \
+    "Canonical fact should appear in context after restart"
 assert "blue" in rendered2.lower(), "Favorite color should be in context"
 
 log("FactStore integration verified: canonical facts persisted and rendered in context")
@@ -324,8 +298,8 @@ print("\nIdentity Evolution Engine is functioning correctly:\n")
 print("  ✓ Preference detection from conversation")
 print("  ✓ Structured mutation proposals")
 print("  ✓ Validation and contradiction detection")
-print("  ✓ Identity spec evolution (preferences, traits, beliefs)")
-print("  ✓ Context composition includes evolved identity BEFORE memory")
+print("  ✓ FactStore canonical facts (no legacy IdentitySpec fields)")
+print("  ✓ Context composition from canonical facts BEFORE memory")
 print("  ✓ Persistence across restart")
 print("  ✓ Meaningful timeline events")
-print("  ✓ Full audit trail in mutation_history")
+print("  ✓ Full audit trail via FactStore event log")
