@@ -14,6 +14,14 @@ document.addEventListener('DOMContentLoaded', () => {
   document.getElementById('btn-create').addEventListener('click', showCreateModal);
   document.getElementById('btn-restart').addEventListener('click', restartRuntime);
   document.getElementById('btn-configure-adapter').addEventListener('click', showAdapterModal);
+
+  // Clear log via double-click on log panel header
+  const logPanel = document.querySelector('#panel-log-body')?.closest('.panel');
+  const logHeader = logPanel?.querySelector('.panel-header');
+  if (logHeader) {
+    logHeader.addEventListener('dblclick', clearLog);
+    logHeader.title = 'Double-click to clear';
+  }
 });
 
 function loadIdentityList() {
@@ -52,6 +60,7 @@ function loadIdentity(id) {
     .then(data => {
       if (data.error) { return; }
       renderIdentity(data.identity);
+      renderEvolution(data.evolution);
       renderMemories(data.memories);
       renderTimeline(data.timeline);
       renderGoals(data.goals);
@@ -60,7 +69,71 @@ function loadIdentity(id) {
       renderEvaluation(data.evaluation);
       renderPersistence(data.persistence);
       renderContext(data.context_sections || null, data.context);
+      updateAllCounts(data);
     });
+}
+
+function updateAllCounts(data) {
+  setCount('memories', data.memories?.length);
+  setCount('timeline', data.timeline?.length);
+  setCount('goals', data.goals?.length);
+  setCount('relationships', data.relationships?.length);
+  setCount('persistence', data.persistence?.length);
+  if (data.evolution) {
+    setCount('evolution', data.evolution.timeline_count);
+  }
+}
+
+function setCount(id, n) {
+  const el = document.getElementById(`count-${id}`);
+  if (!el) return;
+  el.textContent = (n != null && n > 0) ? `(${n})` : '';
+}
+
+function renderEvolution(evo) {
+  const el = document.getElementById('panel-evolution-body');
+  if (!evo || !evo.created_at) {
+    el.innerHTML = '<div class="empty">No evolution data yet.</div>';
+    return;
+  }
+  const age = evo.age_seconds || 0;
+  const days = Math.floor(age / 86400);
+  const hours = Math.floor((age % 86400) / 3600);
+  const ageStr = days > 0 ? `${days}d ${hours}h` : `${hours}h`;
+  const interactions = evo.interaction_count || 0;
+  const mems = evo.memory_count || 0;
+  const rels = evo.relationship_count || 0;
+  const goals = evo.goal_count || 0;
+
+  el.innerHTML = `
+    <div class="evo-grid">
+      <div class="evo-item">
+        <span class="evo-value">${ageStr}</span>
+        <span class="evo-label">Age</span>
+      </div>
+      <div class="evo-item">
+        <span class="evo-value">${interactions}</span>
+        <span class="evo-label">Interactions</span>
+      </div>
+      <div class="evo-item">
+        <span class="evo-value">${mems}</span>
+        <span class="evo-label">Memories</span>
+      </div>
+      <div class="evo-item">
+        <span class="evo-value">${rels}</span>
+        <span class="evo-label">Relationships</span>
+      </div>
+      <div class="evo-item">
+        <span class="evo-value">${goals}</span>
+        <span class="evo-label">Goals</span>
+      </div>
+      <div class="evo-item">
+        <span class="evo-value">${interactions > 0 ? (mems / interactions).toFixed(1) : '-'}</span>
+        <span class="evo-label">Mem/Int</span>
+      </div>
+    </div>
+    <div class="evo-created">Created ${new Date(evo.created_at).toLocaleString()}</div>
+  `;
 }
 
 function renderIdentity(identity) {
@@ -406,6 +479,8 @@ function onChatSubmit(e) {
 
   // Reset pipeline
   resetPipeline();
+  document.getElementById('chat-send').disabled = true;
+  document.getElementById('chat-send').textContent = 'Sending...';
 
   fetch('/playground/api/chat', {
     method: 'POST',
@@ -415,6 +490,8 @@ function onChatSubmit(e) {
   .then(r => r.json())
   .then(data => {
     removePendingMessage(pendingId);
+    document.getElementById('chat-send').disabled = false;
+    document.getElementById('chat-send').textContent = 'Send';
     if (data.error) {
       addChatMessage('assistant', `Error: ${data.error}`);
       return;
@@ -436,6 +513,8 @@ function onChatSubmit(e) {
   })
   .catch(err => {
     removePendingMessage(pendingId);
+    document.getElementById('chat-send').disabled = false;
+    document.getElementById('chat-send').textContent = 'Send';
     addChatMessage('assistant', `Request failed: ${err.message}`);
   });
 }
@@ -444,7 +523,8 @@ function addChatMessage(role, text) {
   const container = document.getElementById('chat-messages');
   const div = document.createElement('div');
   div.className = `chat-msg ${role}`;
-  div.innerHTML = `<div class="msg-label">${role === 'user' ? 'You' : (currentIdentity || 'Assistant')}</div><div class="msg-content">${esc(text)}</div>`;
+  const ts = new Date().toLocaleTimeString();
+  div.innerHTML = `<div class="msg-label">${role === 'user' ? 'You' : (currentIdentity || 'Assistant')} <span class="msg-time">${ts}</span></div><div class="msg-content">${esc(text)}</div>`;
   container.appendChild(div);
   container.scrollTop = container.scrollHeight;
 }
@@ -817,4 +897,17 @@ function addLog(level, text) {
   div.innerHTML = `<span class="log-level ${level}">[${level}]</span><span>${esc(text)}</span>`;
   el.appendChild(div);
   el.scrollTop = el.scrollHeight;
+  updateLogCount();
+}
+
+function updateLogCount() {
+  const el = document.getElementById('panel-log-body');
+  const n = el.querySelectorAll('.log-entry').length;
+  setCount('log', n);
+}
+
+function clearLog() {
+  const el = document.getElementById('panel-log-body');
+  el.innerHTML = '<div class="empty">Runtime log cleared.</div>';
+  updateLogCount();
 }

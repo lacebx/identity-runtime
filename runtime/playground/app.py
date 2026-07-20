@@ -30,6 +30,8 @@ from core.identity import create_identity, IdentitySpec
 from core.evaluation import register_default_criteria
 from core.goals import Goal, GoalPriority, GoalScope
 
+import datetime as _dt
+
 HERE = str(Path(__file__).parent)
 
 # ---------------------------------------------------------------------------
@@ -426,6 +428,24 @@ class RuntimeManager:
             ns = self._storage.list_namespaces(identity_id) if identity_id else []
             persist_files = sorted(ns)
 
+        # Evolution metrics
+        evolution = {
+            "interaction_count": len([e for e in tl_events if e.get("event_type") in ("milestone", "creation")]) if tl_events else 0,
+            "memory_count": len(mem_dicts),
+            "relationship_count": len(edge_dicts),
+            "goal_count": len(goal_dicts),
+            "timeline_count": len(tl_events) if tl_events else 0,
+        }
+        if identity_dict and identity_dict.get("created_at"):
+            try:
+                created = _dt.fromisoformat(identity_dict["created_at"])
+                now = _dt.now(_dt.timezone.utc).replace(tzinfo=None)
+                delta = now - created
+                evolution["age_seconds"] = int(delta.total_seconds())
+                evolution["created_at"] = created.isoformat()
+            except Exception:
+                pass
+
         return {
             "identity": identity_dict,
             "memories": mem_dicts,
@@ -437,6 +457,7 @@ class RuntimeManager:
             "persistence": persist_files,
             "context": current_context,
             "context_sections": context_sections,
+            "evolution": evolution,
         }
 
     def process_message(self, identity_id: str, user_input: str) -> dict:

@@ -92,52 +92,57 @@
 
     <!-- Panels -->
     <div class="panel identity-panel">
-      <div class="panel-header" onclick="togglePanel(this)">Identity <span>&#x25BC;</span></div>
+      <div class="panel-header" onclick="togglePanel(this)">Identity <span class="panel-count" id="count-identity"></span><span>&#x25BC;</span></div>
       <div class="panel-body" id="panel-identity-body"><div class="empty">Select an identity to begin.</div></div>
     </div>
 
+    <div class="panel evolution-panel">
+      <div class="panel-header" onclick="togglePanel(this)">Evolution <span class="panel-count" id="count-evolution"></span><span>&#x25BC;</span></div>
+      <div class="panel-body" id="panel-evolution-body"><div class="empty">Select an identity to begin.</div></div>
+    </div>
+
     <div class="panel">
-      <div class="panel-header" onclick="togglePanel(this)">Memories <span>&#x25BC;</span></div>
+      <div class="panel-header" onclick="togglePanel(this)">Memories <span class="panel-count" id="count-memories"></span><span>&#x25BC;</span></div>
       <div class="panel-body" id="panel-memories-body"><div class="empty">Select an identity to begin.</div></div>
     </div>
 
     <div class="panel">
-      <div class="panel-header" onclick="togglePanel(this)">Timeline <span>&#x25BC;</span></div>
+      <div class="panel-header" onclick="togglePanel(this)">Timeline <span class="panel-count" id="count-timeline"></span><span>&#x25BC;</span></div>
       <div class="panel-body" id="panel-timeline-body"><div class="empty">Select an identity to begin.</div></div>
     </div>
 
     <div class="panel">
-      <div class="panel-header" onclick="togglePanel(this)">Goals <span>&#x25BC;</span></div>
+      <div class="panel-header" onclick="togglePanel(this)">Goals <span class="panel-count" id="count-goals"></span><span>&#x25BC;</span></div>
       <div class="panel-body" id="panel-goals-body"><div class="empty">Select an identity to begin.</div></div>
     </div>
 
     <div class="panel">
-      <div class="panel-header" onclick="togglePanel(this)">Relationships <span>&#x25BC;</span></div>
+      <div class="panel-header" onclick="togglePanel(this)">Relationships <span class="panel-count" id="count-relationships"></span><span>&#x25BC;</span></div>
       <div class="panel-body" id="panel-relationships-body"><div class="empty">Select an identity to begin.</div></div>
     </div>
 
     <div class="panel context-panel">
-      <div class="panel-header" onclick="togglePanel(this)">Context Sent to Adapter <span>&#x25BC;</span></div>
+      <div class="panel-header" onclick="togglePanel(this)">Context Sent to Adapter <span class="panel-count" id="count-context"></span><span>&#x25BC;</span></div>
       <div class="panel-body" id="panel-context-body"><div class="empty">Send a message to see the composed context.</div></div>
     </div>
 
     <div class="panel">
-      <div class="panel-header" onclick="togglePanel(this)">Adapter <span>&#x25BC;</span></div>
+      <div class="panel-header" onclick="togglePanel(this)">Adapter <span class="panel-count" id="count-adapter"></span><span>&#x25BC;</span></div>
       <div class="panel-body" id="panel-adapter-body"><div class="empty">No adapter configured.</div></div>
     </div>
 
     <div class="panel">
-      <div class="panel-header" onclick="togglePanel(this)">Evaluation <span>&#x25BC;</span></div>
+      <div class="panel-header" onclick="togglePanel(this)">Evaluation <span class="panel-count" id="count-evaluation"></span><span>&#x25BC;</span></div>
       <div class="panel-body" id="panel-evaluation-body"><div class="empty">No evaluations yet.</div></div>
     </div>
 
     <div class="panel">
-      <div class="panel-header" onclick="togglePanel(this)">Persistence Events <span>&#x25BC;</span></div>
+      <div class="panel-header" onclick="togglePanel(this)">Persistence Events <span class="panel-count" id="count-persistence"></span><span>&#x25BC;</span></div>
       <div class="panel-body" id="panel-persistence-body"><div class="empty">No persistence events yet.</div></div>
     </div>
 
     <div class="panel">
-      <div class="panel-header" onclick="togglePanel(this)">Runtime Log <span>&#x25BC;</span></div>
+      <div class="panel-header" onclick="togglePanel(this)">Runtime Log <span class="panel-count" id="count-log"></span><span>&#x25BC;</span></div>
       <div class="panel-body" id="panel-log-body" style="max-height:200px"><div class="empty">Runtime log will appear here.</div></div>
     </div>
   </div>

@@ -207,6 +207,16 @@ body {
   margin-bottom: 2px;
   text-transform: uppercase;
   letter-spacing: 0.3px;
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+}
+.chat-msg .msg-time {
+  font-weight: 400;
+  font-size: 9px;
+  color: var(--border);
+  text-transform: none;
+  letter-spacing: 0;
 }
 .chat-msg .msg-content { white-space: pre-wrap; word-break: break-word; }
 .chat-input-area {
@@ -234,6 +244,10 @@ body {
   align-self: flex-end;
   height: 36px;
 }
+.chat-input-area button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
 
 /* Panels */
 .panel {
@@ -256,6 +270,13 @@ body {
   display: flex;
   justify-content: space-between;
   align-items: center;
+  gap: 6px;
+}
+.panel-header .panel-count {
+  font-size: 9px;
+  font-weight: 400;
+  color: var(--text2);
+  margin-left: auto;
 }
 .panel-body {
   padding: 8px 12px;
@@ -276,6 +297,15 @@ body {
   color: var(--text2);
   font-style: italic;
   font-size: 11px;
+}
+
+/* Fade-in animation for new content */
+@keyframes fadeSlideIn {
+  from { opacity: 0; transform: translateY(4px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+.mem-item, .tl-item, .goal-item, .persist-event, .log-entry, .ctx-section, .chat-msg {
+  animation: fadeSlideIn 0.25s ease-out;
 }
 
 /* Memory items */
@@ -680,3 +710,40 @@ body {
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
 ::-webkit-scrollbar-thumb:hover { background: var(--text2); }
+
+/* Evolution panel */
+.evolution-panel .panel-body { font-size: 11px; }
+.evo-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr;
+  gap: 4px;
+  margin-bottom: 6px;
+}
+.evo-item {
+  background: var(--surface2);
+  border-radius: 4px;
+  padding: 6px 8px;
+  text-align: center;
+}
+.evo-value {
+  display: block;
+  font-size: 18px;
+  font-weight: 700;
+  color: var(--accent);
+  line-height: 1.2;
+}
+.evo-label {
+  display: block;
+  font-size: 9px;
+  color: var(--text2);
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+  margin-top: 2px;
+}
+.evo-created {
+  font-size: 9px;
+  color: var(--text2);
+  text-align: center;
+  padding-top: 4px;
+  border-top: 1px solid var(--border);
+}
