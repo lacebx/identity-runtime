@@ -13,6 +13,12 @@ from core.evaluation import (
 )
 from core.goals import GoalEngine
 from core.identity import IdentitySpec, IdentityStore
+from core.identity_facts import FactStore
+from core.identity_mutation import (
+    IdentityMutationEngine,
+    MutationProposal,
+    MutationStatus,
+)
 from core.memory import MemoryFragment, MemoryStore, MemoryType
 from core.motivations import MotivationEngine
 from core.policies import PolicyEngine, PolicyScope
@@ -77,7 +83,9 @@ class IdentityRuntime:
         self.evaluation_engine = EvaluationEngine()
         self.context_composer = ContextComposer(max_tokens=max_context_tokens)
         self.motivation_engine = MotivationEngine()
+        self.mutation_engine = IdentityMutationEngine(min_confidence=0.5)
         self.timeline_registry = TimelineRegistry()
+        self._fact_stores: Dict[str, FactStore] = {}
 
         self.adapter = adapter
         self._sessions: Dict[str, str] = {}
@@ -132,6 +140,7 @@ class IdentityRuntime:
                 self._load_timeline(spec.id)
                 self._load_relationships(spec.id)
                 self._load_goals(spec.id)
+                self._load_fact_store(spec.id)
                 return spec
         return None
 
@@ -139,6 +148,7 @@ class IdentityRuntime:
         """Register a new identity with the runtime and persist."""
         self.identity_store.save(identity)
         self.timeline_registry.create(identity.id)
+        self._fact_stores[identity.id] = FactStore()
         if self._storage:
             snapshot_data = identity.to_dict()
             self._storage.save(identity.id, "identity_spec", snapshot_data)
@@ -334,6 +344,84 @@ class IdentityRuntime:
         except Exception:
             pass
 
+    def _persist_identity(self, identity: IdentitySpec) -> None:
+        if not self._storage:
+            return
+        try:
+            snapshot_data = identity.to_dict()
+            self._storage.save(identity.id, "identity_spec", snapshot_data)
+            self._storage.save(
+                identity.id,
+                "latest_snapshot",
+                {"modules": {"identity": snapshot_data}},
+            )
+        except Exception:
+            pass
+
+    def _migrate_legacy_fields_to_fact_store(
+        self, identity: IdentitySpec, fact_store: FactStore,
+    ) -> int:
+        """
+        One-time migration: copy any data from legacy IdentitySpec fields
+        (preferences, beliefs, mutation_history, etc.) into the FactStore.
+
+        This ensures old identities loaded from disk aren't silently orphaned.
+        Returns the number of facts migrated.
+        """
+        migrated = 0
+        # Legacy snapshot may have had a 'preferences' dict embedded in the
+        # identity spec data. We check via storage directly.
+        if not self._storage:
+            return 0
+        try:
+            raw = self._storage.load(identity.id, "identity_spec")
+            if not raw:
+                raw = self._storage.load_latest(identity.id)
+            if not raw:
+                return 0
+            if isinstance(raw, dict) and "modules" in raw:
+                raw = raw["modules"].get("identity", raw)
+            from core.identity_facts import FactSource
+
+            legacy_prefs = raw.get("preferences", {}) if isinstance(raw, dict) else {}
+            for key, value in legacy_prefs.items():
+                field = f"preferences.{key}"
+                if not fact_store.find(field):
+                    fact_store.merge_or_reinforce(
+                        field=field, value=value, confidence=0.7,
+                        reasons=["Migrated from legacy identity spec"],
+                        source=FactSource.IMPORTED,
+                    )
+                    migrated += 1
+
+            legacy_beliefs = raw.get("beliefs", {}) if isinstance(raw, dict) else {}
+            for key, value in legacy_beliefs.items():
+                field = f"beliefs.{key}"
+                if not fact_store.find(field):
+                    fact_store.merge_or_reinforce(
+                        field=field, value=value, confidence=0.7,
+                        reasons=["Migrated from legacy identity spec"],
+                        source=FactSource.IMPORTED,
+                    )
+                    migrated += 1
+
+            legacy_traits = raw.get("traits", []) if isinstance(raw, dict) else []
+            for t_data in legacy_traits:
+                name = t_data.get("name", "unknown")
+                score = t_data.get("score", 0.5)
+                desc = t_data.get("description", "")
+                field = f"traits.{name}"
+                if not fact_store.find(field):
+                    fact_store.merge_or_reinforce(
+                        field=field, value={"score": score, "description": desc},
+                        confidence=0.7, reasons=["Migrated from legacy traits"],
+                        source=FactSource.IMPORTED,
+                    )
+                    migrated += 1
+        except Exception:
+            pass
+        return migrated
+
     def _load_goals(self, identity_id: str) -> None:
         if not self._storage:
             return
@@ -365,6 +453,276 @@ class IdentityRuntime:
                 self.goal_engine.add(goal)
         except Exception:
             pass
+
+    def _load_fact_store(self, identity_id: str) -> None:
+        """Load the FactStore for an identity from storage.
+        Also runs one-time migration from legacy IdentitySpec fields.
+        """
+        if not self._storage:
+            self._fact_stores[identity_id] = FactStore()
+            return
+        try:
+            data = self._storage.load(identity_id, "fact_store")
+            if data and "facts" in data:
+                self._fact_stores[identity_id] = FactStore.from_dict_full(data)
+            else:
+                self._fact_stores[identity_id] = FactStore()
+        except Exception:
+            self._fact_stores[identity_id] = FactStore()
+
+        # One-time migration from legacy fields
+        identity = self.identity_store.get(identity_id)
+        store = self._fact_stores.get(identity_id)
+        if identity and store and len(store) == 0:
+            migrated = self._migrate_legacy_fields_to_fact_store(identity, store)
+            if migrated > 0:
+                self._save_fact_store(identity_id)
+
+    def _save_fact_store(self, identity_id: str) -> None:
+        """Persist the FactStore for an identity."""
+        if not self._storage:
+            return
+        store = self._fact_stores.get(identity_id)
+        if store is None:
+            return
+        try:
+            self._storage.save(identity_id, "fact_store", store.to_dict_full())
+        except Exception:
+            pass
+
+    # ------------------------------------------------------------------
+    # Public Query API
+    # ------------------------------------------------------------------
+
+    def inspect_identity(self, identity_id: str) -> Dict[str, Any]:
+        """
+        Return a comprehensive inspection of the identity's current state.
+
+        This is the primary introspection endpoint. It returns everything:
+        - Identity constitution (generated)
+        - Canonical facts from FactStore
+        - Stability and age metrics
+        - Evidence graph summary
+        - Fact revisions
+        - Recent reinforcements
+        - Pending/rejected mutations
+        - Contradiction log
+        - Timeline events
+        - Goals
+        - Relationships
+        - Communication style
+        - User knowledge
+        - Runtime statistics
+        """
+        identity = self.identity_store.get(identity_id)
+        if identity is None:
+            return {"error": f"Identity '{identity_id}' not found"}
+
+        fact_store = self._fact_stores.get(identity_id)
+        tl = self.timeline_registry.get(identity_id)
+        age_delta = (datetime.now(timezone.utc).replace(tzinfo=None)
+                     - identity.created_at.replace(tzinfo=None)) if identity.created_at else None
+        age_days = age_delta.days if age_delta else 0
+
+        # Build constitution
+        constitution = ""
+        try:
+            from core.constitution import build_constitution
+            constitution = build_constitution(
+                identity=identity,
+                fact_store=fact_store,
+                timeline=tl,
+            )
+        except Exception:
+            constitution = "(constitution generation failed)"
+
+        # Fact stats
+        all_facts = fact_store.all() if fact_store else []
+        active_facts = [f for f in all_facts if f.status.value == "active"] if fact_store else []
+
+        # Evidence summary
+        evidence_summary = {}
+        try:
+            from core.evidence_graph import EvidenceGraph
+            evidence_graph = getattr(self, '_evidence_graphs', {}).get(identity_id)
+            if evidence_graph:
+                all_evidence = list(evidence_graph._nodes.values())
+                evidence_summary = {
+                    "total_evidence_nodes": len(all_evidence),
+                    "by_type": {
+                        t: len([e for e in all_evidence if e.type.value == t])
+                        for t in set(e.type.value for e in all_evidence)
+                    } if all_evidence else {},
+                }
+        except Exception:
+            pass
+
+        # Contradiction log
+        contradictions = []
+        try:
+            contradictions = self.mutation_engine._contradiction_engine.conflict_log()
+        except Exception:
+            pass
+
+        # Pending and rejected mutations
+        pending = []
+        rejected = []
+        for p in self.mutation_engine.proposal_history():
+            if p.status.value == "proposed":
+                pending.append({
+                    "field": p.field, "new_value": p.new_value,
+                    "confidence": p.confidence, "reason": p.reason,
+                })
+            elif p.status.value == "rejected":
+                rejected.append({
+                    "field": p.field, "new_value": p.new_value,
+                    "reason": p.rejection_reason,
+                })
+
+        # Timeline events
+        timeline_events = []
+        if tl:
+            timeline_events = [
+                {"type": e.event_type.value, "title": e.title,
+                 "description": e.description, "timestamp": e.occurred_at.isoformat() if hasattr(e, 'occurred_at') and hasattr(e.occurred_at, 'isoformat') else str(getattr(e, 'occurred_at', ''))}
+                for e in tl.events()
+            ]
+
+        # Goals
+        goals_data = []
+        try:
+            for g in self.goal_engine.list_by_scope("persistent"):
+                goals_data.append({
+                    "id": g.id, "title": g.title, "status": g.status.value,
+                    "priority": g.priority.value, "progress": g.progress,
+                })
+        except Exception:
+            pass
+
+        # Relationships
+        relationships = []
+        try:
+            for edge in self.identity_graph.get_relationships(identity_id):
+                relationships.append({
+                    "target": edge.target_id, "trust": edge.trust_level.value,
+                    "strength": edge.strength, "tags": edge.tags,
+                })
+        except Exception:
+            pass
+
+        # Runtime stats
+        event_log_count = len(fact_store.replay()) if fact_store else 0
+        runtime_stats = {
+            "interaction_count": len(self.mutation_engine.proposal_history()),
+            "mutation_history_count": event_log_count,
+            "fact_count": len(all_facts),
+            "active_fact_count": len(active_facts),
+            "timeline_event_count": len(timeline_events),
+            "goal_count": len(goals_data),
+            "relationship_count": len(relationships),
+            "memory_count": len(self.memory_store.by_identity(identity_id)) if identity_id else 0,
+        }
+
+        # Recent reinforcements
+        recent_reinforcements = []
+        if fact_store:
+            for f in all_facts:
+                if f.times_reinforced > 0:
+                    recent_reinforcements.append({
+                        "field": f.field, "value": f.value,
+                        "times_reinforced": f.times_reinforced,
+                        "confidence": f.confidence,
+                        "last_confirmed": f.last_confirmed,
+                    })
+            recent_reinforcements.sort(key=lambda x: x["last_confirmed"], reverse=True)
+
+        return {
+            "identity": {
+                "id": identity.id,
+                "name": identity.name,
+                "class": identity.identity_class.value,
+                "version": identity.version,
+                "age_days": age_days,
+                "status": identity.status.value,
+                "persona": identity.persona,
+                "communication_style": identity.communication_style,
+            },
+            "constitution": constitution,
+            "canonical_facts": {
+                "total": len(all_facts),
+                "active": len(active_facts),
+                "by_domain": {
+                    d.value: len([f for f in all_facts if f.domain.value == d.value])
+                    for d in {f.domain for f in all_facts}
+                } if all_facts else {},
+                "facts": [
+                    {
+                        "fact_id": f.fact_id[:8],
+                        "domain": f.domain.value,
+                        "field": f.field,
+                        "value": f.value,
+                        "confidence": round(f.confidence, 2),
+                        "status": f.status.value,
+                        "times_reinforced": f.times_reinforced,
+                        "reasons": f.reasons[:3],
+                        "version_count": len(f.version_history),
+                    }
+                    for f in sorted(all_facts, key=lambda x: x.last_confirmed, reverse=True)[:50]
+                ],
+            },
+            "fact_revisions": [
+                {
+                    "field": f.field,
+                    "versions": [
+                        {"value": v.value, "confidence": v.confidence,
+                         "status": v.status.value, "first_seen": v.first_seen}
+                        for v in fact_store.all_versions_for_field(f.field)
+                    ] if fact_store else [],
+                }
+                for f in active_facts[:20]
+            ],
+            "recent_reinforcements": recent_reinforcements[:10],
+            "pending_mutations": pending,
+            "rejected_mutations": rejected,
+            "contradictions": contradictions[-10:],
+            "evidence": evidence_summary,
+            "timeline": timeline_events[-20:],
+            "goals": goals_data,
+            "relationships": relationships,
+            "runtime_stats": runtime_stats,
+        }
+
+    def get_fact(self, identity_id: str, field: str) -> Dict[str, Any]:
+        """Query a specific fact with full provenance."""
+        identity = self.identity_store.get(identity_id)
+        if identity is None:
+            return {"error": f"Identity '{identity_id}' not found"}
+        return identity.explain_fact(
+            field=field,
+            fact_store=self._fact_stores.get(identity_id),
+        )
+
+    def identity_constitution(self, identity_id: str) -> str:
+        """Generate the identity constitution dynamically from current state."""
+        identity = self.identity_store.get(identity_id)
+        if identity is None:
+            return f"Identity '{identity_id}' not found"
+        try:
+            from core.constitution import build_constitution
+            return build_constitution(
+                identity=identity,
+                fact_store=self._fact_stores.get(identity_id),
+                timeline=self.timeline_registry.get(identity_id),
+            )
+        except Exception as e:
+            return f"(constitution generation failed: {e})"
+
+    def replay_events(self, identity_id: str) -> List[Dict[str, Any]]:
+        """Replay all fact events for an identity."""
+        fact_store = self._fact_stores.get(identity_id)
+        if fact_store is None:
+            return []
+        return [e.to_dict() for e in fact_store.replay()]
 
     def _extract_and_store_semantic_memory(
         self,
@@ -544,6 +902,7 @@ class IdentityRuntime:
             identity_graph=self.identity_graph,
             motivation_engine=self.motivation_engine,
             timeline_registry=self.timeline_registry,
+            fact_store=self._fact_stores.get(identity.id),
             query=sanitized_input,
             top_k_memories=top_k_memories,
         )
@@ -648,6 +1007,57 @@ class IdentityRuntime:
             session_id=request.session_id,
         )
 
+        # Stage 7c: Identity Mutation — detect identity evolution opportunities
+        # Wire the identity's FactStore into the mutation engine
+        fact_store = self._fact_stores.get(identity.id)
+        if fact_store is not None:
+            self.mutation_engine.fact_store = fact_store
+
+        mutation_proposals = self.mutation_engine.analyze(
+            user_input=sanitized_input,
+            assistant_response=final_output,
+            identity_spec=identity,
+        )
+
+        if mutation_proposals:
+            # Validate against FactStore (the ONLY canonical source)
+            validated = self.mutation_engine.validate(
+                mutation_proposals,
+                existing_records=None,
+            )
+
+            # Apply ALL validated proposals to FactStore (canonical identity facts)
+            # Accepted proposals become active facts; rejected/conflict proposals
+            # are still recorded in the FactStore event log via the mutation engine.
+            self.mutation_engine.apply_proposals_to_fact_store(validated)
+
+            for proposal in validated:
+                if proposal.status in (MutationStatus.ACCEPTED, MutationStatus.CONFLICT):
+                    self._emit(
+                        EventType.IDENTITY_MUTATION_ACCEPTED
+                        if proposal.status == MutationStatus.ACCEPTED
+                        else EventType.IDENTITY_MUTATION_CONFLICT,
+                        identity_id=identity.id,
+                        session_id=request.session_id,
+                        field=proposal.field,
+                        old_value=proposal.old_value,
+                        new_value=proposal.new_value,
+                        confidence=proposal.confidence,
+                        reason=proposal.reason,
+                    )
+                else:
+                    self._emit(
+                        EventType.IDENTITY_MUTATION_REJECTED,
+                        identity_id=identity.id,
+                        session_id=request.session_id,
+                        field=proposal.field,
+                        reason=proposal.rejection_reason,
+                    )
+
+            # Persist the fact store (IdentitySpec is metadata-only)
+            self._save_fact_store(identity.id)
+            self._persist_identity(identity)
+
         # Determine timeline title from semantic classification
         tl_title = "Interaction"
         tl_description = f"User said: {sanitized_input[:100]}"
@@ -669,7 +1079,8 @@ class IdentityRuntime:
             tl_meta["memory_id"] = semantic_mem.id
             tl_meta["memory_type"] = semantic_mem.memory_type.value
 
-        # Stage 8: Record timeline life event
+        # Stage 8: Record timeline life events
+        # Record the interaction event
         self.timeline_registry.record_event(
             identity.id,
             LifeEvent(
@@ -681,6 +1092,42 @@ class IdentityRuntime:
                 metadata=tl_meta,
             ),
         )
+
+        # Record mutation timeline events for accepted proposals
+        for proposal in mutation_proposals if mutation_proposals else []:
+            if proposal.status != MutationStatus.ACCEPTED:
+                continue
+            mutation_type_map = {
+                MutationType.PREFERENCE_ADOPTED: LifeEventType.PREFERENCE_LEARNED,
+                MutationType.PREFERENCE_CHANGED: LifeEventType.PREFERENCE_LEARNED,
+                MutationType.BELIEF_ADOPTED: LifeEventType.BELIEF_ADOPTED,
+                MutationType.BELIEF_CHANGED: LifeEventType.BELIEF_ADOPTED,
+                MutationType.TRAIT_EVOLVED: LifeEventType.TRAIT_CHANGED,
+                MutationType.TRUST_EVOLVED: LifeEventType.TRUST_CHANGED,
+                MutationType.COMMUNICATION_EVOLVED: LifeEventType.COMMUNICATION_CHANGED,
+            }
+            tl_event_type = mutation_type_map.get(
+                proposal.mutation_type, LifeEventType.PREFERENCE_LEARNED
+            )
+            field_short = proposal.field.split(".")[-1].replace("_", " ")
+            self.timeline_registry.record_event(
+                identity.id,
+                LifeEvent(
+                    identity_id=identity.id,
+                    event_type=tl_event_type,
+                    title=f"{tl_event_type.value.replace('_', ' ').title()}: {field_short}",
+                    description=proposal.reason,
+                    significance=3,
+                    metadata={
+                        "mutation_id": proposal.mutation_id,
+                        "field": proposal.field,
+                        "old_value": proposal.old_value,
+                        "new_value": proposal.new_value,
+                        "confidence": proposal.confidence,
+                    },
+                ),
+            )
+
         self._persist_timeline(identity.id)
         self._emit(
             EventType.LIFE_EVENT_RECORDED,

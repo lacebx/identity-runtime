@@ -16,7 +16,10 @@ import hashlib
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Any, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Dict, List, Optional
+
+if TYPE_CHECKING:
+    from .identity_facts import FactDomain, FactStatus, FactStore, IdentityFact
 
 # ─── Enums ────────────────────────────────────────────────────────────────────
 
@@ -245,6 +248,68 @@ class IdentitySpec:
                 return t
         return None
 
+    # ── FactStore-backed query methods ──────────────────────────────────
+    # These query the canonical FactStore. The FactStore is the ONLY source
+    # of evolved identity state. IdentitySpec holds metadata only.
+
+    def get_facts(
+        self, fact_store: Optional["FactStore"] = None,
+    ) -> List["IdentityFact"]:
+        """Return all canonical facts from the FactStore."""
+        if fact_store is not None:
+            return fact_store.all()
+        return []
+
+    def get_traits_from_facts(
+        self, fact_store: Optional["FactStore"] = None,
+    ) -> List[Dict[str, Any]]:
+        """Return canonical trait facts from the FactStore."""
+        if fact_store is not None:
+            trait_facts = [f for f in fact_store.by_domain(FactDomain.TRAIT)
+                           if f.status == FactStatus.ACTIVE]
+            if trait_facts:
+                return [
+                    {"name": f.field.split(".")[-1], "score": f.value.get("score", 0.5),
+                     "description": f.value.get("description", "")}
+                    if isinstance(f.value, dict) else
+                    {"name": f.field.split(".")[-1], "score": 0.5, "description": str(f.value)}
+                    for f in trait_facts
+                ]
+        return []
+
+    def explain_fact(
+        self, field: str, fact_store: Optional["FactStore"] = None,
+    ) -> Dict[str, Any]:
+        """
+        Return a complete explanation of a fact: current value, confidence,
+        evidence, version history, and any superseded versions.
+        """
+        if fact_store is None:
+            return {"field": field, "error": "No FactStore available"}
+        current = fact_store.find(field)
+        versions = fact_store.all_versions_for_field(field)
+        return {
+            "field": field,
+            "current": {
+                "value": current.value if current else None,
+                "confidence": current.confidence if current else None,
+                "status": current.status.value if current else None,
+                "times_reinforced": current.times_reinforced if current else 0,
+                "last_confirmed": current.last_confirmed if current else None,
+                "reasons": current.reasons if current else [],
+                "evidence_ids": current.evidence_ids if current else [],
+            } if current else None,
+            "version_count": len(versions),
+            "versions": [
+                {"value": v.value, "confidence": v.confidence,
+                 "status": v.status.value, "first_seen": v.first_seen,
+                 "last_confirmed": v.last_confirmed,
+                 "times_reinforced": v.times_reinforced,
+                 "version_log": v.version_history}
+                for v in versions
+            ],
+        }
+
     def to_dict(self) -> Dict[str, Any]:
         """Serialize to a plain dict for storage/transport."""
         return {
@@ -286,7 +351,10 @@ class IdentitySpec:
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "IdentitySpec":
-        """Deserialize from a plain dict."""
+        """Deserialize from a plain dict.
+        Legacy evolved fields (preferences, beliefs, mutation_history, etc.)
+        are silently absorbed — they are no longer stored on IdentitySpec.
+        """
         core_values = [
             CoreValue(
                 name=cv["name"],
