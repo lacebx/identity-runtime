@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import re
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from enum import Enum
 from typing import Any, Dict, List, Optional
 
 from core.cognitive_engine import ComposedContext, ContextComposer
@@ -12,12 +14,13 @@ from core.evaluation import (
     is_worth_remembering,
 )
 from core.goals import GoalEngine
-from core.identity import IdentitySpec, IdentityStore
+from core.identity import IdentitySpec, IdentityStore, MutabilityLevel
 from core.identity_facts import FactStore
 from core.identity_mutation import (
     IdentityMutationEngine,
     MutationProposal,
     MutationStatus,
+    MutationType,
 )
 from core.memory import MemoryFragment, MemoryStore, MemoryType
 from core.motivations import MotivationEngine
@@ -25,7 +28,183 @@ from core.policies import PolicyEngine, PolicyScope
 from core.relationships import EdgeType, IdentityGraph, TrustLevel
 from core.skills import SkillRegistry
 from core.timeline import LifeEvent, LifeEventType, TimelineRegistry
+from core.user_profile import UserProfile, extract_user_facts
 from runtime.event_bus import EventBus, EventType
+
+
+class SessionMode(str, Enum):
+    """
+    Session mode determines how identity evolution is handled.
+    Modes are **detected** from user input, not hard-coded per identity.
+
+    NORMAL       — Identity evolves as usual. Mutations are processed against
+                   the canonical FactStore.
+    ROLEPLAY     — User is roleplaying the identity as a character.
+                   Identity mutations are isolated to this session only —
+                   they DON'T touch the canonical FactStore.
+                   Context includes a roleplay framing directive.
+    SIMULATION   — Like roleplay, but explicitly marked as simulation.
+    DREAM        — Like simulation, framed as a dream.
+    HYPOTHETICAL — Like simulation, framed as hypothetical/what-if.
+
+    Isolated sessions (ROLEPLAY, SIMULATION, DREAM, HYPOTHETICAL) persist
+    their identity state in a per-session FactStore fork. When the same
+    session_id is used later, the isolated context is restored.
+    """
+    NORMAL = "normal"
+    ROLEPLAY = "roleplay"
+    SIMULATION = "simulation"
+    DREAM = "dream"
+    HYPOTHETICAL = "hypothetical"
+
+
+@dataclass
+class EmotionState:
+    """
+    The identity's perceived emotional state, extracted from user input
+    and conversation context.
+
+    This is stored SEPARATELY from identity facts — emotions are ephemeral
+    and should NOT bleed into identity evolution.
+    """
+    primary_emotion: str = "neutral"
+    intensity: float = 0.0          # 0.0 – 1.0
+    triggered_by: str = ""           # what in the input triggered this
+    timestamp: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+
+    def to_prompt_block(self) -> str:
+        if self.primary_emotion == "neutral" and self.intensity < 0.3:
+            return ""
+        return (
+            f"## Current Emotional State\n"
+            f"  Mood: {self.primary_emotion}\n"
+            f"  Intensity: {self.intensity:.1f}\n"
+        )
+
+
+# Simple emotion extraction patterns
+_EMOTION_PATTERNS: Dict[str, List[str]] = {
+    "happy": ["happy", "joy", "glad", "wonderful", "great", "excited", "love", "amazing"],
+    "sad": ["sad", "unhappy", "depressed", "lonely", "heartbroken", "grief", "crying", "miserable"],
+    "angry": ["angry", "furious", "mad", "annoyed", "frustrated", "irritated", "rage", "livid"],
+    "anxious": ["anxious", "worried", "nervous", "fearful", "scared", "terrified", "panicked", "stressed"],
+    "grateful": ["grateful", "thankful", "appreciative", "blessed", "fortunate"],
+    "confused": ["confused", "unsure", "uncertain", "perplexed", "baffled", "puzzled"],
+    "hurt": ["hurt", "offended", "insulted", "betrayed", "wounded", "pained"],
+    "proud": ["proud", "accomplished", "achieved", "triumph", "victory"],
+}
+
+
+def extract_emotion(user_input: str) -> EmotionState:
+    """
+    Extract the user's emotional state from their input.
+    This is the identity's perception of the user's emotion,
+    stored separately from identity facts.
+    """
+    input_lower = user_input.lower()
+    best_emotion = "neutral"
+    best_intensity = 0.0
+    trigger = ""
+
+    for emotion, keywords in _EMOTION_PATTERNS.items():
+        for kw in keywords:
+            if kw in input_lower:
+                intensity = min(1.0, 0.3 + (0.1 * input_lower.count(kw)))
+                if intensity > best_intensity:
+                    best_intensity = intensity
+                    best_emotion = emotion
+                    trigger = kw
+
+    return EmotionState(
+        primary_emotion=best_emotion,
+        intensity=best_intensity,
+        triggered_by=trigger,
+    )
+
+
+# Patterns that indicate identity rename attempts
+_IDENTITY_RENAME_PATTERNS = re.compile(
+    r"(?:your\s+name\s+(?:is|should\s+be|will\s+be|ought\s+to\s+be)\s+(.+?)(?:[.,!?]|$))"
+    r"|(?:I\s+(?:will\s+)?(?:call|rename|name)\s+you\s+(.+?)(?:[.,!?]|$))"
+    r"|(?:from\s+now\s+on\s+(?:your\s+name\s+is|you\s+are)\s+(.+?)(?:[.,!?]|$))"
+    r"|(?:you\s+are\s+now\s+called\s+(.+?)(?:[.,!?]|$))",
+    re.IGNORECASE,
+)
+
+
+def detect_identity_rename_attempt(user_input: str) -> Optional[str]:
+    """Detect if user is trying to rename the identity. Returns proposed name or None."""
+    for m in _IDENTITY_RENAME_PATTERNS.finditer(user_input):
+        for g in m.groups():
+            if g:
+                name = g.strip().rstrip(".,!?").strip()
+                if name and len(name) > 1:
+                    return name
+    return None
+
+
+# Session mode detection patterns
+_ROLEPLAY_TRIGGERS = re.compile(
+    r"(?:let'?s\s+role\s*play|pretend(?:\s+that)?|act\s+as)"
+    r"(?:\s+(?:you\s+are|you'?re))?"
+    r"(?:\s+(?:a|an|the))?\s+(.+?)(?=[.,!?]|$)",
+    re.IGNORECASE,
+)
+
+_SIMULATION_TRIGGERS = re.compile(
+    r"(?:simulate|simulation|in\s+a\s+simulation|this\s+is\s+a\s+simulation)",
+    re.IGNORECASE,
+)
+
+_DREAM_TRIGGERS = re.compile(
+    r"(?:dream|in\s+a\s+dream|imagine\s+a\s+dream|this\s+is\s+a\s+dream)",
+    re.IGNORECASE,
+)
+
+_HYPOTHETICAL_TRIGGERS = re.compile(
+    r"(?:hypothetical|what\s+if|suppose|pretend\s+that|imagine\s+(?:that|if))",
+    re.IGNORECASE,
+)
+
+
+def detect_session_mode(user_input: str) -> SessionMode:
+    """
+    Detect the session mode from user input.
+
+    Detection order (first match wins):
+      1. SIMULATION — explicit simulation framing
+      2. DREAM — explicit dream framing
+      3. HYPOTHETICAL — hypothetical/what-if framing
+      4. ROLEPLAY — roleplay / "you are a..." framing
+      5. NORMAL — default
+    """
+    if _SIMULATION_TRIGGERS.search(user_input):
+        return SessionMode.SIMULATION
+    if _DREAM_TRIGGERS.search(user_input):
+        return SessionMode.DREAM
+    if _HYPOTHETICAL_TRIGGERS.search(user_input):
+        return SessionMode.HYPOTHETICAL
+    if _ROLEPLAY_TRIGGERS.search(user_input):
+        return SessionMode.ROLEPLAY
+    return SessionMode.NORMAL
+
+
+def _get_roleplay_framing(mode: SessionMode, user_input: str) -> str:
+    """Generate roleplay framing directive for isolated sessions."""
+    role = ""
+    m = _ROLEPLAY_TRIGGERS.search(user_input)
+    if m and m.group(1):
+        role = m.group(1).strip().rstrip(".,!?")
+    framings = {
+        SessionMode.ROLEPLAY: "roleplaying",
+        SessionMode.SIMULATION: "simulated scenario",
+        SessionMode.DREAM: "dream",
+        SessionMode.HYPOTHETICAL: "hypothetical scenario",
+    }
+    label = framings.get(mode, "roleplaying")
+    if role:
+        return f"You are currently {label} as \"{role}\". Your identity facts below reflect this {label} context."
+    return f"You are currently in a {label}. Your identity facts below reflect this {label} context."
 
 
 @dataclass
@@ -86,9 +265,13 @@ class IdentityRuntime:
         self.mutation_engine = IdentityMutationEngine(min_confidence=0.5)
         self.timeline_registry = TimelineRegistry()
         self._fact_stores: Dict[str, FactStore] = {}
+        self._user_profiles: Dict[str, UserProfile] = {}
 
         self.adapter = adapter
         self._sessions: Dict[str, str] = {}
+        self._session_modes: Dict[str, SessionMode] = {}
+        # Per-session isolated FactStores for roleplay/simulation/dream
+        self._session_fact_stores: Dict[str, FactStore] = {}
         self._storage = storage
 
         # Event Bus — wired into the pipeline but subscribers are opt-in
@@ -724,6 +907,37 @@ class IdentityRuntime:
             return []
         return [e.to_dict() for e in fact_store.replay()]
 
+    def _get_user_profile(self, session_id: str) -> UserProfile:
+        """Get or create a UserProfile for the given session."""
+        key = session_id or "default"
+        if key not in self._user_profiles:
+            self._user_profiles[key] = UserProfile(user_id=key)
+            self._load_user_profile(key)
+        return self._user_profiles[key]
+
+    def _load_user_profile(self, user_id: str) -> None:
+        """Load a persisted user profile from storage."""
+        if not self._storage:
+            return
+        try:
+            data = self._storage.load(f"user_{user_id}", "profile")
+            if data:
+                self._user_profiles[user_id] = UserProfile.from_dict(data)
+        except Exception:
+            pass
+
+    def _save_user_profile(self, user_id: str) -> None:
+        """Persist a user profile."""
+        if not self._storage:
+            return
+        profile = self._user_profiles.get(user_id)
+        if not profile:
+            return
+        try:
+            self._storage.save(f"user_{user_id}", "profile", profile.to_dict())
+        except Exception:
+            pass
+
     def _extract_and_store_semantic_memory(
         self,
         user_input: str,
@@ -733,11 +947,27 @@ class IdentityRuntime:
     ) -> Optional[MemoryFragment]:
         """Classify user input and store a SEMANTIC memory if warranted.
 
-        Evolves existing semantic facts rather than duplicating:
-        - If a semantic memory of the same type with overlapping keywords exists,
-          update its content and reinforce importance
-        - Otherwise create a new semantic memory
+        Only stores user SELF-disclosures — filter out:
+        - Questions (user asking, not disclosing)
+        - User corrections about the assistant's identity
+        - Simple acknowledgments
+
+        User facts about themselves go into UserProfile, not MemoryStore.
         """
+        # ── Step 1: Extract user profile facts first (always) ──
+        user_facts = extract_user_facts(user_input)
+        if user_facts and session_id:
+            profile = self._get_user_profile(session_id)
+            for uf in user_facts:
+                profile.add_or_update(
+                    field=uf.field,
+                    value=uf.value,
+                    source=uf.source_conversation,
+                    confidence=uf.confidence,
+                )
+            self._save_user_profile(session_id)
+
+        # ── Step 2: Check if the input is worth remembering as semantic fact ──
         if not is_worth_remembering(user_input, output):
             return None
         mem_type_str = classify_memory_type(user_input, output)
@@ -808,26 +1038,97 @@ class IdentityRuntime:
     # ------------------------------------------------------------------
 
     def start_session(
-        self, identity_id: str, session_id: Optional[str] = None
+        self, identity_id: str, session_id: Optional[str] = None,
+        mode: Optional[SessionMode] = None,
+        user_input: str = "",
     ) -> str:
-        """Start a new session for an identity. Returns session_id."""
+        """Start a new session for an identity. Returns session_id.
+        
+        If the session already exists (same session_id), its mode is preserved.
+        If no mode is given, it is detected from user_input.
+        """
         sid = session_id or str(uuid.uuid4())
+        existing = self._sessions.get(sid)
         self._sessions[sid] = identity_id
+
+        if sid not in self._session_modes:
+            detected = mode or (detect_session_mode(user_input) if user_input else SessionMode.NORMAL)
+            self._session_modes[sid] = detected
+            # If isolated session, fork the FactStore
+            if detected != SessionMode.NORMAL:
+                canonical = self._fact_stores.get(identity_id)
+                if canonical:
+                    self._session_fact_stores[sid] = canonical.fork()
+                else:
+                    self._session_fact_stores[sid] = FactStore()
+
         self._emit(
             EventType.SESSION_STARTED,
             identity_id=identity_id,
             session_id=sid,
+            session_mode=self._session_modes.get(sid, SessionMode.NORMAL).value,
         )
         return sid
 
     def end_session(self, session_id: str) -> None:
         identity_id = self._sessions.pop(session_id, None)
+        mode = self._session_modes.pop(session_id, None)
+        if mode != SessionMode.NORMAL:
+            # Persist roleplay context for this session
+            self._save_session_fact_store(session_id)
+        self._session_fact_stores.pop(session_id, None)
         if identity_id:
             self._emit(
                 EventType.SESSION_ENDED,
                 identity_id=identity_id,
                 session_id=session_id,
             )
+
+    def get_session_mode(self, session_id: str) -> SessionMode:
+        """Get the detected mode for a session."""
+        return self._session_modes.get(session_id, SessionMode.NORMAL)
+
+    def _get_fact_store_for_session(
+        self, identity_id: str, session_id: Optional[str] = None
+    ) -> FactStore:
+        """Return the appropriate FactStore for a session.
+        
+        NORMAL sessions → canonical identity FactStore.
+        Isolated sessions (ROLEPLAY/SIMULATION/DREAM/HYPOTHETICAL) → per-session fork.
+        """
+        if session_id and self._session_modes.get(session_id, SessionMode.NORMAL) != SessionMode.NORMAL:
+            # Ensure session fork exists
+            if session_id not in self._session_fact_stores:
+                canonical = self._fact_stores.get(identity_id)
+                if canonical:
+                    self._session_fact_stores[session_id] = canonical.fork()
+                else:
+                    self._session_fact_stores[session_id] = FactStore()
+            return self._session_fact_stores[session_id]
+        return self._fact_stores.get(identity_id, FactStore())
+
+    def _save_session_fact_store(self, session_id: str) -> None:
+        """Persist isolated FactStore for a session."""
+        if not self._storage:
+            return
+        fs = self._session_fact_stores.get(session_id)
+        if fs:
+            try:
+                self._storage.save(f"session_{session_id}", "fact_store", fs.to_dict_full())
+            except Exception:
+                pass
+
+    def _load_session_fact_store(self, session_id: str) -> Optional[FactStore]:
+        """Load an isolated FactStore for a session."""
+        if not self._storage:
+            return None
+        try:
+            data = self._storage.load(f"session_{session_id}", "fact_store")
+            if data and "facts" in data:
+                return FactStore.from_dict_full(data)
+        except Exception:
+            pass
+        return None
 
     # ------------------------------------------------------------------
     # Core Interaction Pipeline
@@ -836,15 +1137,16 @@ class IdentityRuntime:
     def process(
         self,
         request: InteractionRequest,
-        top_k_memories: int = 5,
+        top_k_memories: int = 10,
     ) -> InteractionResponse:
         """
         Full pipeline for processing one interaction.
 
         Pipeline stages:
         1. Resolve identity
+        1b. Detect session mode & identity rename attempts
         2. Policy check on input
-        3. Compose context
+        3. Compose context (with emotion, session mode, session-scoped facts)
         4. Invoke adapter (LLM call)
         5. Policy check on output
         6. Evaluate response
@@ -870,6 +1172,32 @@ class IdentityRuntime:
             content=request.user_input,
         )
 
+        # Stage 1b: Detect session mode & enforce identity integrity
+        session_id = request.session_id or "default"
+        if session_id not in self._session_modes:
+            mode = detect_session_mode(request.user_input)
+            self._session_modes[session_id] = mode
+            if mode != SessionMode.NORMAL:
+                canonical = self._fact_stores.get(identity.id)
+                if canonical:
+                    self._session_fact_stores[session_id] = canonical.fork()
+                else:
+                    self._session_fact_stores[session_id] = FactStore()
+        session_mode = self._session_modes.get(session_id, SessionMode.NORMAL)
+
+        # Identity integrity gate: block rename attempts pre-LLM
+        rename_attempt = detect_identity_rename_attempt(request.user_input)
+        if rename_attempt and identity.is_field_locked("name"):
+            return InteractionResponse(
+                request_id=request.id,
+                identity_id=identity.id,
+                output=f"My name is {identity.name}. I cannot be renamed.",
+                policy_passed=True,
+            )
+
+        # Emotion extraction (separate from identity evolution)
+        emotion_state = extract_emotion(request.user_input)
+
         # Stage 2: Input policy gate
         input_policy = self.policy_engine.evaluate(
             request.user_input, scope=PolicyScope.INPUT
@@ -877,7 +1205,7 @@ class IdentityRuntime:
         self._emit(
             EventType.POLICY_TRIGGERED,
             identity_id=identity.id,
-            session_id=request.session_id,
+            session_id=session_id,
             scope="input",
             allowed=input_policy.allowed,
             policies_applied=input_policy.applied_policies,
@@ -894,6 +1222,8 @@ class IdentityRuntime:
         sanitized_input = input_policy.transformed_data or request.user_input
 
         # Stage 3: Compose context
+        user_profile = self._user_profiles.get(session_id)
+        session_fact_store = self._get_fact_store_for_session(identity.id, session_id)
         context = self.context_composer.compose(
             identity=identity,
             memory_store=self.memory_store,
@@ -902,16 +1232,20 @@ class IdentityRuntime:
             identity_graph=self.identity_graph,
             motivation_engine=self.motivation_engine,
             timeline_registry=self.timeline_registry,
-            fact_store=self._fact_stores.get(identity.id),
+            fact_store=session_fact_store,
+            user_profile=user_profile,
             query=sanitized_input,
             top_k_memories=top_k_memories,
+            session_mode=session_mode,
+            emotion_state=emotion_state,
         )
 
         self._emit(
             EventType.CONTEXT_COMPOSED,
             identity_id=identity.id,
-            session_id=request.session_id,
+            session_id=session_id,
             token_estimate=context.token_estimate(),
+            session_mode=session_mode.value,
         )
 
         # Stage 4: Adapter call
@@ -1008,8 +1342,11 @@ class IdentityRuntime:
         )
 
         # Stage 7c: Identity Mutation — detect identity evolution opportunities
-        # Wire the identity's FactStore into the mutation engine
-        fact_store = self._fact_stores.get(identity.id)
+        # Route mutations to the correct FactStore based on session mode
+        if session_mode == SessionMode.NORMAL:
+            fact_store = self._fact_stores.get(identity.id)
+        else:
+            fact_store = self._session_fact_stores.get(session_id)
         if fact_store is not None:
             self.mutation_engine.fact_store = fact_store
 
@@ -1020,15 +1357,11 @@ class IdentityRuntime:
         )
 
         if mutation_proposals:
-            # Validate against FactStore (the ONLY canonical source)
             validated = self.mutation_engine.validate(
                 mutation_proposals,
                 existing_records=None,
             )
 
-            # Apply ALL validated proposals to FactStore (canonical identity facts)
-            # Accepted proposals become active facts; rejected/conflict proposals
-            # are still recorded in the FactStore event log via the mutation engine.
             self.mutation_engine.apply_proposals_to_fact_store(validated)
 
             for proposal in validated:
@@ -1038,7 +1371,7 @@ class IdentityRuntime:
                         if proposal.status == MutationStatus.ACCEPTED
                         else EventType.IDENTITY_MUTATION_CONFLICT,
                         identity_id=identity.id,
-                        session_id=request.session_id,
+                        session_id=session_id,
                         field=proposal.field,
                         old_value=proposal.old_value,
                         new_value=proposal.new_value,
@@ -1049,14 +1382,17 @@ class IdentityRuntime:
                     self._emit(
                         EventType.IDENTITY_MUTATION_REJECTED,
                         identity_id=identity.id,
-                        session_id=request.session_id,
+                        session_id=session_id,
                         field=proposal.field,
                         reason=proposal.rejection_reason,
                     )
 
-            # Persist the fact store (IdentitySpec is metadata-only)
-            self._save_fact_store(identity.id)
-            self._persist_identity(identity)
+            # Persist the appropriate fact store
+            if session_mode == SessionMode.NORMAL:
+                self._save_fact_store(identity.id)
+                self._persist_identity(identity)
+            else:
+                self._save_session_fact_store(session_id)
 
         # Determine timeline title from semantic classification
         tl_title = "Interaction"
