@@ -44,6 +44,22 @@ class IdentityClass(str, Enum):
     CUSTOM = "custom"
 
 
+class MutabilityLevel(str, Enum):
+    """
+    How a field may change over the identity's lifetime.
+
+    LOCKED     — Immutable. The runtime MUST reject attempts to change this field.
+                 (e.g. name, core_values — the identity's soul)
+    MUTABLE    — May be updated directly by the mutation engine.
+                 (e.g. role, persona, communication_style)
+    EVOLVABLE  — May be updated, but only through the FactStore's evidence-based
+                 revision process with confidence decay. (e.g. preferences, beliefs)
+    """
+    LOCKED = "locked"
+    MUTABLE = "mutable"
+    EVOLVABLE = "evolvable"
+
+
 # ─── CoreValue ────────────────────────────────────────────────────────────────
 
 @dataclass
@@ -168,11 +184,34 @@ class IdentitySpec:
     # Set by the Evaluation module after first comprehensive eval
     fidelity_baseline: Optional[float] = None
 
+    # ── Mutability ───────────────────────────────────────────────────────────
+    # Defines which fields of the identity CORE are immutable.
+    # The runtime MUST enforce these — any mutation to a LOCKED field
+    # must be rejected before the LLM sees the input.
+    # Fields NOT listed here inherit the IdentityClass default.
+    mutability: Dict[str, MutabilityLevel] = field(default_factory=lambda: {
+        "name": MutabilityLevel.LOCKED,
+        "core_values": MutabilityLevel.LOCKED,
+        "id": MutabilityLevel.LOCKED,
+        "identity_class": MutabilityLevel.LOCKED,
+        "role": MutabilityLevel.MUTABLE,
+        "persona": MutabilityLevel.MUTABLE,
+        "communication_style": MutabilityLevel.MUTABLE,
+    })
+
     # ── Metadata ─────────────────────────────────────────────────────────────
     tags: List[str] = field(default_factory=list)
     extra: Dict[str, Any] = field(default_factory=dict)
 
     # ─────────────────────────────────────────────────────────────────────────
+
+    def is_field_locked(self, field: str) -> bool:
+        """Check if a field is immutable (LOCKED) and cannot be mutated."""
+        return self.mutability.get(field, MutabilityLevel.EVOLVABLE) == MutabilityLevel.LOCKED
+
+    def get_mutability(self, field: str) -> MutabilityLevel:
+        """Return the mutability level for a field."""
+        return self.mutability.get(field, MutabilityLevel.EVOLVABLE)
 
     def fingerprint(self) -> str:
         """
@@ -347,6 +386,17 @@ class IdentitySpec:
             "fidelity_baseline": self.fidelity_baseline,
             "tags": self.tags,
             "extra": self.extra,
+            "mutability": {k: v.value for k, v in self.mutability.items()},
+            "version_history": [
+                {
+                    "version": vh.version,
+                    "created_at": vh.created_at.isoformat(),
+                    "fingerprint": vh.fingerprint,
+                    "changelog": vh.changelog,
+                    "branch": vh.branch,
+                }
+                for vh in self.version_history
+            ],
         }
 
     @classmethod
@@ -408,6 +458,28 @@ class IdentitySpec:
             fidelity_baseline=data.get("fidelity_baseline"),
             tags=data.get("tags", []),
             extra=data.get("extra", {}),
+            mutability={
+                k: MutabilityLevel(v)
+                for k, v in data.get("mutability", {}).items()
+            } if data.get("mutability") else {
+                "name": MutabilityLevel.LOCKED,
+                "core_values": MutabilityLevel.LOCKED,
+                "id": MutabilityLevel.LOCKED,
+                "identity_class": MutabilityLevel.LOCKED,
+                "role": MutabilityLevel.MUTABLE,
+                "persona": MutabilityLevel.MUTABLE,
+                "communication_style": MutabilityLevel.MUTABLE,
+            },
+            version_history=[
+                IdentityVersion(
+                    version=v["version"],
+                    created_at=datetime.fromisoformat(v["created_at"]),
+                    fingerprint=v["fingerprint"],
+                    changelog=v.get("changelog", ""),
+                    branch=v.get("branch"),
+                )
+                for v in data.get("version_history", [])
+            ],
         )
 
 

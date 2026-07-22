@@ -320,6 +320,20 @@ class FactStore:
     def to_dict_list(self) -> List[Dict[str, Any]]:
         return [f.to_dict() for f in self._facts.values()]
 
+    def fork(self) -> "FactStore":
+        """
+        Create a deep fork of this FactStore with the same active facts
+        but an independent event log.
+        
+        Used by session isolation: roleplay sessions get a snapshot of the
+        canonical identity's facts that they can mutate independently.
+        """
+        import copy
+        fork = FactStore()
+        for fact in self._facts.values():
+            fork.add(copy.deepcopy(fact))
+        return fork
+
     def to_dict_full(self) -> Dict[str, Any]:
         return {
             "facts": self.to_dict_list(),

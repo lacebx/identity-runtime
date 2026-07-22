@@ -34,12 +34,48 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Try reading API keys from .env file if present
+_env_file = os.path.join(os.path.dirname(os.path.dirname(__file__)), ".env")
+if os.path.isfile(_env_file):
+    try:
+        with open(_env_file) as _f:
+            for _line in _f:
+                _line = _line.strip()
+                if _line and not _line.startswith("#") and "=" in _line:
+                    _k, _v = _line.split("=", 1)
+                    os.environ.setdefault(_k.strip(), _v.strip().strip("\"'"))
+    except Exception:
+        pass
+
 # Initialize the runtime orchestrator with persistence and optional adapter
 storage = JSONFileBackend(root_dir=".identity_store")
 
-adapter_type = os.environ.get("IDENTITY_ADAPTER", "")
 adapter = None
-if adapter_type:
+adapter_type = os.environ.get("IDENTITY_ADAPTER", "")
+
+# Priority 1: Auto-detect OpenRouter if OPENROUTER_API_KEY is set
+if os.environ.get("OPENROUTER_API_KEY"):
+    try:
+        from adapters.openrouter_adapter import OpenRouterAdapter
+        model = os.environ.get("IDENTITY_MODEL", "openai/gpt-4o")
+        adapter = OpenRouterAdapter(model=model)
+        logger.info(f"Auto-configured OpenRouter adapter (model={model})")
+    except Exception as e:
+        logger.warning(f"Failed to initialize OpenRouter adapter: {e}")
+
+# Priority 2: Auto-detect Groq if any GROQ_API_KEY is set
+_groq_keys = [os.environ.get(k) for k in ("GROQ_API_KEY", "GROQ_API_KEY_2", "GROQ_API_KEY_3", "GROQ_API_KEY_4")]
+if not adapter and any(k for k in _groq_keys if k and "PLACEHOLDER" not in k):
+    try:
+        from adapters.groq_adapter import GroqAdapter
+        model = os.environ.get("IDENTITY_MODEL", "llama-3.3-70b-versatile")
+        adapter = GroqAdapter(model=model)
+        logger.info(f"Auto-configured Groq adapter (model={model}) with key rotation")
+    except Exception as e:
+        logger.warning(f"Failed to initialize Groq adapter: {e}")
+
+# Priority 3: Explicit IDENTITY_ADAPTER env var
+if not adapter and adapter_type:
     try:
         from adapters import get_adapter
         adapter_config: dict[str, Any] = {}
@@ -50,6 +86,14 @@ if adapter_type:
         logger.info(f"Using adapter: {adapter_type} (model={adapter_config.get('model', 'default')})")
     except Exception as e:
         logger.warning(f"Failed to initialize adapter '{adapter_type}': {e}")
+
+if not adapter and os.environ.get("OPENAI_API_KEY"):
+    try:
+        from adapters.openai_adapter import OpenAIAdapter
+        adapter = OpenAIAdapter(model=os.environ.get("IDENTITY_MODEL", "gpt-4o"))
+        logger.info("Auto-configured OpenAI adapter")
+    except Exception as e:
+        logger.warning(f"Failed to initialize OpenAI adapter: {e}")
 
 runtime = IdentityRuntime(storage=storage, adapter=adapter)
 register_default_criteria(runtime.evaluation_engine)
@@ -102,6 +146,7 @@ class ProcessResponse(BaseModel):
     session_id: str
     policy_passed: bool
     eval_score: Optional[float] = None
+    session_mode: str = "normal"
 
 
 # --- Endpoints ---
@@ -149,6 +194,7 @@ async def process(req: ProcessRequest):
         session_id=session_id,
         policy_passed=result.policy_passed,
         eval_score=result.eval_score,
+        session_mode=runtime.get_session_mode(session_id).value,
     )
 
 
@@ -264,6 +310,19 @@ def clear_memories(user_id: str, identity_id: str):
     """Clear all memories for an identity."""
     deleted = runtime.memory_store.clear_identity(identity_id)
     return {"deleted": deleted, "message": "Memories cleared."}
+
+
+@app.get("/session/{session_id}")
+def get_session(session_id: str):
+    """Inspect session state (mode, active identity)."""
+    identity_id = runtime._sessions.get(session_id)
+    mode = runtime.get_session_mode(session_id)
+    return {
+        "session_id": session_id,
+        "identity_id": identity_id,
+        "session_mode": mode.value,
+        "is_isolated": mode.value != "normal",
+    }
 
 
 if __name__ == "__main__":

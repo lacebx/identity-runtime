@@ -5,6 +5,7 @@ from typing import Any, Optional
 from .base import BaseAdapter, AdapterMessage, AdapterRequest, AdapterResponse
 from .openai_adapter import OpenAIAdapter, AnthropicAdapter, OllamaAdapter
 from .openrouter_adapter import OpenRouterAdapter
+from .groq_adapter import GroqAdapter
 
 
 def get_adapter(
@@ -18,6 +19,7 @@ def get_adapter(
         "anthropic": AnthropicAdapter,
         "ollama": OllamaAdapter,
         "openrouter": OpenRouterAdapter,
+        "groq": GroqAdapter,
     }
     if adapter_type not in registry:
         raise ValueError(
@@ -35,5 +37,6 @@ __all__ = [
     "AnthropicAdapter",
     "OllamaAdapter",
     "OpenRouterAdapter",
+    "GroqAdapter",
     "get_adapter",
 ]

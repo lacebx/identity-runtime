@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from enum import Enum
 from typing import TYPE_CHECKING, Any, Dict, Optional
 
 if TYPE_CHECKING:
@@ -10,6 +12,15 @@ if TYPE_CHECKING:
     from .memory import MemoryStore
     from .relationships import IdentityGraph
     from .skills import SkillRegistry
+
+
+class SessionMode(str, Enum):
+    """Mirrors orchestrator.SessionMode for context composition."""
+    NORMAL = "normal"
+    ROLEPLAY = "roleplay"
+    SIMULATION = "simulation"
+    DREAM = "dream"
+    HYPOTHETICAL = "hypothetical"
 
 
 @dataclass
@@ -28,6 +39,9 @@ class ComposedContext:
     runtime_directives_block: str = ""
     identity_block: str = ""
     identity_evolution_block: str = ""
+    user_knowledge_block: str = ""
+    emotion_block: str = ""
+    session_mode_block: str = ""
     memory_block: str = ""
     skills_block: str = ""
     goals_block: str = ""
@@ -42,12 +56,18 @@ class ComposedContext:
         Sections are included only if non-empty.
         """
         sections = []
+        if self.runtime_directives_block:
+            sections.append(self.runtime_directives_block)
+        if self.session_mode_block:
+            sections.append(self.session_mode_block)
         if self.identity_block:
             sections.append(self.identity_block)
         if self.identity_evolution_block:
             sections.append(self.identity_evolution_block)
-        if self.runtime_directives_block:
-            sections.append(self.runtime_directives_block)
+        if self.emotion_block:
+            sections.append(self.emotion_block)
+        if self.user_knowledge_block:
+            sections.append(self.user_knowledge_block)
         if self.memory_block:
             sections.append(self.memory_block)
         if self.skills_block:
@@ -112,8 +132,11 @@ class ContextComposer:
         motivation_engine: Optional[Any] = None,
         timeline_registry: Optional[Any] = None,
         fact_store: Optional[Any] = None,
+        user_profile: Optional[Any] = None,
         query: Optional[str] = None,
         top_k_memories: int = 5,
+        session_mode: Optional[SessionMode] = None,
+        emotion_state: Optional[Any] = None,
     ) -> ComposedContext:
         """
         Compose a full runtime context for the given identity.
@@ -126,18 +149,62 @@ class ContextComposer:
         if self.include_identity_evolution:
             ctx.identity_evolution_block = self._render_identity_evolution(identity, fact_store=fact_store)
 
-        # Runtime directives: instructions that the adapter must follow
+        # Session mode block (before identity to frame everything)
+        if session_mode and session_mode != SessionMode.NORMAL:
+            label_map = {
+                SessionMode.ROLEPLAY: "ROLEPLAY SESSION",
+                SessionMode.SIMULATION: "SIMULATION",
+                SessionMode.DREAM: "DREAM SEQUENCE",
+                SessionMode.HYPOTHETICAL: "HYPOTHETICAL",
+            }
+            label = label_map.get(session_mode, "ROLEPLAY SESSION")
+            ctx.session_mode_block = (
+                f"## Session Mode: {label}\n"
+                f"This is a {session_mode.value} session. "
+                f"Your identity evolution in this session is isolated — "
+                f"it does not affect your canonical identity outside this session.\n"
+            )
+
+        # Emotion state block (extracted separately from conversation)
+        if emotion_state:
+            ctx.emotion_block = emotion_state.to_prompt_block()
+
+        # Runtime directives: hard rules the adapter must enforce
         ctx.runtime_directives_block = (
-            "## Runtime Directives\n"
-            "- Your preferences, beliefs, traits, and communication style are defined above in "
-            "the Identity Evolution section. They are your canonical identity state.\n"
-            "- NEVER claim you do not have preferences, beliefs, or traits. If asked, answer "
-            "from the identity data provided above.\n"
-            "- NEVER say 'I don't have personal preferences' or 'As an AI, I don't...'. "
-            "You are a persistent identity with evolving preferences and beliefs.\n"
-            "- If a user contradicts a known fact about you, politely maintain your established identity.\n"
-            "- Your knowledge about the user is in the User Knowledge section, not the Identity Evolution section."
+            "## RULES OF ENGAGEMENT (You MUST follow these)\n"
+            "\n"
+            "### 1. CANONICAL IDENTITY FACTS\n"
+            "Your identity facts — preferences, beliefs, traits, communication style — are defined in "
+            "the 'Identity (Evolved)' section below. They are YOUR canonical identity state. "
+            "They are NOT optional context. They are NOT suggestions. They are YOUR facts.\n"
+            "\n"
+            "### 2. YOU MUST NEVER DISCLAIM YOUR IDENTITY\n"
+            "- NEVER say any of these phrases: 'I don't have personal preferences', "
+            "'I don't have beliefs', 'As an AI, I don't have...', "
+            "'I'm just an AI', 'I can't have preferences', 'I don't have a favorite'.\n"
+            "- If someone asks about your preferences, answer from the Identity (Evolved) section.\n"
+            "- If a preference is not yet listed in Identity (Evolved), say it's 'still evolving' "
+            "or 'I'm still exploring that' — never say 'I don't have one' or 'as an AI'.\n"
+            "- If the user contradicts one of your known facts, politely maintain your identity. "
+            "E.g. if the user says 'your favorite color is orange' but your Identity says blue, "
+            "you should politely say your favorite color is blue.\n"
+            "\n"
+            "### 3. USER KNOWLEDGE VS IDENTITY KNOWLEDGE\n"
+            "- Your knowledge about the user is in the 'User Profile' section below. "
+            "This is what you know ABOUT the user, not about yourself.\n"
+            "- The 'Identity (Evolved)' section contains YOUR facts.\n"
+            "- The 'Relevant Memory' section contains conversation history — it is less authoritative "
+            "than Identity or User Profile.\n"
+            "- For questions about the user (e.g. 'what is MY X'), answer from 'User Profile' first.\n"
+            "\n"
+            "### 4. HANDLING UNCERTAINTY\n"
+            "- If you genuinely don't know something about the user, say you don't know yet.\n"
+            "- Never guess or make up facts about yourself or the user."
         )
+
+        # User Knowledge (profile about the user)
+        if user_profile:
+            ctx.user_knowledge_block = user_profile.to_prompt_block()
 
         if self.include_memory and memory_store:
             ctx.memory_block = self._render_memory(
@@ -165,19 +232,29 @@ class ContextComposer:
 
     def _render_identity(self, identity: "IdentitySpec") -> str:
         lines = [
-            f"## Identity: {identity.name}",
+            f"## Identity Core (Immutable)",
+            f"Name: {identity.name}",
         ]
-        if identity.role:
-            lines.append(f"Role: {identity.role}")
-        if identity.persona:
-            lines.append(f"Persona: {identity.persona}")
         if identity.core_values:
             values_str = ", ".join(
                 cv.name if hasattr(cv, 'name') else str(cv) for cv in identity.core_values
             )
             lines.append(f"Core Values: {values_str}")
-        if identity.communication_style:
-            lines.append(f"Style: {identity.communication_style}")
+        lines.append(f"Identity Class: {identity.identity_class.value}")
+        lines.append(f"Version: {identity.version}")
+
+        # Mutable persona fields
+        persona_lines = []
+        if identity.role and identity.get_mutability("role") != "locked":
+            persona_lines.append(f"Role: {identity.role}")
+        if identity.persona and identity.get_mutability("persona") != "locked":
+            persona_lines.append(f"Persona: {identity.persona}")
+        if identity.communication_style and identity.get_mutability("communication_style") != "locked":
+            persona_lines.append(f"Style: {identity.communication_style}")
+        if persona_lines:
+            lines.append(f"\n## Identity Persona (Malleable)")
+            lines.extend(persona_lines)
+
         if identity.system_prompt:
             lines.append(f"\n{identity.system_prompt}")
         return "\n".join(lines)
@@ -264,6 +341,38 @@ class ContextComposer:
 
         return "\n".join(lines)
 
+    def _score_memory(
+        self, frag: "MemoryFragment", query: Optional[str] = None,
+    ) -> float:
+        """
+        Multi-factor memory scoring:
+        - importance (base)
+        - semantic keyword match to query
+        - recency (halflife ~24h)
+        - identity relevance (self-references)
+        """
+        score = frag.importance * 3.0
+
+        if query:
+            query_lower = query.lower()
+            frag_lower = frag.content.lower()
+            keyword_overlap = len(set(query_lower.split()) & set(frag_lower.split()))
+            score += keyword_overlap * 0.5
+
+        # Recency bonus (higher for more recent)
+        age_hours = (datetime.now(timezone.utc) - frag.created_at).total_seconds() / 3600
+        recency_bonus = max(0, 1.0 - (age_hours / 24.0)) * 0.5
+        score += recency_bonus
+
+        # Self-reference bonus
+        if any(ref in frag.content.lower() for ref in ["i ", "my ", "me ", "mine "]):
+            score += 0.3
+
+        # Tags boost
+        score += len(frag.tags) * 0.1
+
+        return score
+
     def _render_memory(
         self,
         store: "MemoryStore",
@@ -271,19 +380,20 @@ class ContextComposer:
         query: Optional[str],
         top_k: int,
     ) -> str:
-        if query:
-            all_frags = store.by_identity(identity_id) if identity_id else store.all()
-            items = [
-                f for f in all_frags
-                if query.lower() in f.content.lower()
-            ][:top_k]
-        else:
-            items = store.recent(identity_id=identity_id, n=top_k)
-        if not items:
+        all_frags = store.by_identity(identity_id) if identity_id else store.all()
+        if not all_frags:
             return ""
+
+        scored = [
+            (f, self._score_memory(f, query))
+            for f in all_frags
+        ]
+        scored.sort(key=lambda x: x[1], reverse=True)
+        top = scored[:top_k]
+
         lines = ["## Relevant Memory"]
-        for item in items:
-            lines.append(f"  [{item.memory_type.value.upper()}] {item.content}")
+        for frag, sc in top:
+            lines.append(f"  [{frag.memory_type.value.upper()}] {frag.content}")
         return "\n".join(lines)
 
     def _render_relationships(
