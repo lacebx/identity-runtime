@@ -594,6 +594,7 @@ class IdentityObject:
             "completed_at": intention.completed_at.isoformat() if intention.completed_at else "",
             "confidence": getattr(intention, "confidence", 0.0),
             "confidence_label": getattr(intention, "confidence_label", "unknown"),
+            "metadata": getattr(intention, "metadata", {}),
         }
 
     # ═══════════════════════════════════════════════════════════════════
@@ -1073,8 +1074,444 @@ class IdentityObject:
                 "description": getattr(s, "description", ""),
                 "version": getattr(s, "version", ""),
             }
-            for s in self._runtime.skill_registry.list()
+            for s in self._runtime.skill_registry.list_active()
         ]
+
+    # ═══════════════════════════════════════════════════════════════════
+    # Natural Language Understanding — Intention, Meeting, Deadline
+    # ═══════════════════════════════════════════════════════════════════
+
+    _COMMITMENT_PATTERNS = [
+        (r"(?:I'?ll|I will|I'm going to|Let me|I shall)\s+(.+?)(?:\s+(?:today|tomorrow|tonight|this week|next week|this weekend|on\s+\w+day|in\s+\d+\s+(?:hour|day|week|minute)s?|by\s+\w+day|by\s+tomorrow|by\s+\d+\s*(?:pm|am)))?\s*\.?\s*$", 1),
+        (r"(?:I'?ll|I will|I'm going to)\s+(.+?)\s+(?:today|tomorrow|tonight|this week|next week|this weekend|on\s+\w+day|in\s+\d+\s+(?:hour|day|week|minute)s?|by\s+\w+day|by\s+tomorrow)", 1),
+        (r"(?:finish|complete|done with|done|deploy|release|push|submit|send|write|implement|fix|resolve)\s+(.+?)(?:\s+(?:today|tomorrow|tonight|this week|next week|by\s+\w+day|in\s+\d+\s+(?:hour|day)s?))?\s*\.?\s*$", 0),
+    ]
+
+    _DEADLINE_PATTERNS = [
+        (r"(?:by|before|for)\s+(today|tomorrow|tonight|this week|next week|this weekend|(\w+day)(?:\s+at\s+\d+)?)", 1),
+        (r"(?:today|tomorrow|tonight|this week|next week|this weekend|in\s+\d+\s+(?:hour|day|week|minute)s?)", 0),
+    ]
+
+    _MEETING_PATTERNS = [
+        r"(?:let'?s|we should|we need to|can we|could we|shall we)\s+(?:meet|sync|catch up|talk|discuss|chat|huddle)",
+        r"(?:meeting|sync|catch[- ]?up|huddle|standup|call)\s+(?:today|tomorrow|this week|next week|on\s+\w+day|at\s+\d+)",
+        r"(?:schedule|set up|plan|arrange)\s+(?:a\s+)?(?:meeting|sync|call|chat)",
+    ]
+
+    _TEMPORAL_ALIASES = {
+        "today": (0, "day"),
+        "tonight": (0, "day"),
+        "tomorrow": (1, "day"),
+        "this week": (0, "week"),
+        "next week": (1, "week"),
+        "this weekend": (0, "week"),
+    }
+
+    def _parse_timeframe(self, text: str) -> Optional[Tuple[int, str]]:
+        """Try to extract a relative timeframe from text. Returns (amount, unit) or None."""
+        text_lower = text.lower()
+        # Check aliases
+        for alias, (amt, unit) in self._TEMPORAL_ALIASES.items():
+            if alias in text_lower:
+                return (amt, unit)
+
+        # "in X hours/days/weeks"
+        import re
+        m = re.search(r"in\s+(\d+)\s+(hour|day|week|minute)s?", text_lower)
+        if m:
+            return (int(m.group(1)), m.group(2))
+
+        # Day-of-week mentions
+        day_names = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
+        today_idx = datetime.now().weekday()
+        for i, name in enumerate(day_names):
+            if name in text_lower:
+                days_ahead = (i - today_idx) % 7
+                if days_ahead == 0:
+                    days_ahead = 7  # next week
+                return (days_ahead, "day")
+
+        return None
+
+    def infer_intentions(
+        self,
+        text: str,
+        author_id: str = "",
+        source_channel: str = "",
+    ) -> List[Dict[str, Any]]:
+        """
+        Parse natural language text for commitments and create intentions.
+
+        Detects patterns like:
+          - "I'll finish authentication tomorrow."
+          - "I will deploy tonight."
+          - "Let me review the PR."
+          - "I'm going to write documentation this week."
+
+        Args:
+            text: The user's message text
+            author_id: Discord user ID who made the commitment
+            source_channel: Discord channel/thread ID
+
+        Returns:
+            List of created intention dicts
+        """
+        import re
+
+        results: List[Dict[str, Any]] = []
+        text_clean = text.strip()
+
+        # Try each commitment pattern
+        for pattern, group_idx in self._COMMITMENT_PATTERNS:
+            for m in re.finditer(pattern, text_clean, re.IGNORECASE):
+                description = m.group(group_idx).strip().rstrip(".,!?")
+                if not description or len(description) < 3:
+                    continue
+
+                # Try to extract deadline
+                hours = 24
+                timeframe = self._parse_timeframe(text_clean)
+                if timeframe:
+                    amount, unit = timeframe
+                    if unit == "day":
+                        hours = amount * 24
+                    elif unit == "week":
+                        hours = amount * 24 * 7
+                    elif unit == "hour":
+                        hours = amount
+                    elif unit == "minute":
+                        hours = max(1, amount // 60)
+
+                # Create the intention via the runtime
+                # Tag with the author so we know who committed
+                intention = self.intention(
+                    description=description,
+                    priority="medium",
+                    hours=hours,
+                    metadata={
+                        "author_id": author_id,
+                        "source_channel": source_channel,
+                        "source_text": text_clean,
+                        "inferred": True,
+                    },
+                )
+
+                # Record timeline event
+                self.record_event(
+                    event_type="milestone",
+                    title=f"Intention created: {description[:60]}",
+                    description=f"{author_id} committed to: {description}",
+                    significance=2,
+                )
+
+                results.append(intention)
+                return results  # One intention per message
+
+        return results
+
+    def infer_meetings(
+        self,
+        text: str,
+        author_id: str = "",
+        source_channel: str = "",
+    ) -> List[Dict[str, Any]]:
+        """
+        Parse natural language text for meeting proposals and record them.
+
+        Detects patterns like:
+          - "Let's meet Friday at 7."
+          - "We should sync tomorrow."
+          - "Can we schedule a meeting?"
+
+        Args:
+            text: The user's message text
+            author_id: Discord user ID who proposed the meeting
+            source_channel: Discord channel/thread ID
+
+        Returns:
+            List of created meeting event dicts
+        """
+        import re
+
+        results: List[Dict[str, Any]] = []
+        text_lower = text.lower()
+        text_clean = text.strip()
+
+        for pattern in self._MEETING_PATTERNS:
+            if re.search(pattern, text_lower):
+                # Extract proposed time
+                timeframe = self._parse_timeframe(text)
+                meeting_time = ""
+                if timeframe:
+                    amount, unit = timeframe
+                    if unit == "day":
+                        from datetime import timedelta
+                        meeting_dt = datetime.now() + timedelta(days=amount)
+                        meeting_time = meeting_dt.strftime("%A at 10:00 AM")
+                    else:
+                        meeting_time = f"{amount} {unit}(s) from now"
+                else:
+                    meeting_time = "proposed (no specific time detected)"
+
+                title = f"Meeting proposed by {author_id}"
+                description = text_clean[:200]
+
+                # Record as timeline event
+                event_id = self.record_event(
+                    event_type="milestone",
+                    title=title,
+                    description=f"Proposed by {author_id}. Time: {meeting_time}. Context: {description}",
+                    significance=3,
+                )
+
+                # Store meeting info as a memory
+                self.remember(
+                    content=f"Meeting: {text_clean[:200]} | Proposed by: {author_id} | Time: {meeting_time}",
+                    tags=["meeting", "scheduled"],
+                )
+
+                results.append({
+                    "event_id": event_id,
+                    "title": title,
+                    "proposed_by": author_id,
+                    "proposed_time": meeting_time,
+                    "source_text": text_clean[:200],
+                })
+                break
+
+        return results
+
+    def reminders(self, max_results: int = 20) -> List[Dict[str, Any]]:
+        """
+        Get chronological list of intentions that are:
+          - Due soon (within next 4 hours)
+          - Overdue (past deadline)
+          - Expiring today
+
+        Returns sorted list with human-readable status labels.
+        """
+        from datetime import datetime, timezone
+
+        intentions = self._runtime.intention_engine.all()
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
+        results: List[Dict[str, Any]] = []
+
+        for i in intentions:
+            if i.status.value != "active":
+                continue
+            if not i.expires_at:
+                continue
+
+            expires = i.expires_at
+            if isinstance(expires, str):
+                from datetime import datetime as dt
+                expires = dt.fromisoformat(expires)
+
+            remaining = (expires - now).total_seconds()
+            hours_left = remaining / 3600
+
+            label = "on_track"
+            urgency = 0
+            if remaining <= 0:
+                label = "overdue"
+                urgency = 5
+            elif hours_left <= 1:
+                label = "due_soon"
+                urgency = 4
+            elif hours_left <= 4:
+                label = "approaching"
+                urgency = 3
+            elif hours_left <= 24:
+                label = "due_today"
+                urgency = 2
+            elif hours_left <= 48:
+                label = "due_tomorrow"
+                urgency = 1
+
+            results.append({
+                "id": i.id,
+                "description": i.description,
+                "author_id": i.metadata.get("author_id", "unknown") if hasattr(i, "metadata") and i.metadata else "",
+                "label": label,
+                "urgency": urgency,
+                "hours_left": round(hours_left, 1),
+                "expires_at": expires.isoformat() if hasattr(expires, "isoformat") else str(expires),
+                "created_at": i.created_at.isoformat() if i.created_at else "",
+            })
+
+        results.sort(key=lambda r: (-r["urgency"], r["hours_left"]))
+        return results[:max_results]
+
+    def team_status(self) -> Dict[str, Any]:
+        """
+        Generate a structured summary of what the team is working on.
+
+        Aggregates:
+          - Active goals
+          - Active intentions (grouped by author)
+          - Upcoming meetings from timeline
+          - Recent timeline events
+          - Relationship changes
+
+        Returns a dict suitable for rendering as a status update.
+        """
+        active_goals = self._runtime.goal_engine.active()
+        active_intentions = self._runtime.intention_engine.active()
+        timeline = self._runtime.timeline_registry.get(self._identity_id)
+        relationships = self._runtime.identity_graph.get_relationships(self._identity_id)
+
+        # Group intentions by author
+        by_author: Dict[str, List[Dict[str, Any]]] = {}
+        for i in active_intentions:
+            author = i.metadata.get("author_id", "unknown") if hasattr(i, "metadata") and i.metadata else "unknown"
+            if author not in by_author:
+                by_author[author] = []
+            by_author[author].append({
+                "id": i.id,
+                "description": i.description,
+                "priority": i.priority.name if hasattr(i.priority, "name") else str(i.priority),
+                "expires_at": i.expires_at.isoformat() if i.expires_at else "",
+            })
+
+        # Upcoming meetings from timeline (last 30 days, high significance)
+        upcoming: List[Dict[str, Any]] = []
+        if timeline:
+            for e in timeline.events():
+                if "Meeting" in e.title or "meeting" in e.title or e.significance >= 3:
+                    upcoming.append({
+                        "id": e.id,
+                        "title": e.title,
+                        "significance": e.significance,
+                        "occurred_at": e.occurred_at.isoformat() if e.occurred_at else "",
+                    })
+
+        # Relationship summary
+        rel_summary: List[Dict[str, Any]] = []
+        for r in relationships:
+            tl = r.trust_level.value if hasattr(r.trust_level, "value") else r.trust_level
+            rel_summary.append({
+                "entity_id": r.target_id,
+                "edge_type": r.edge_type.value if hasattr(r.edge_type, "value") else str(r.edge_type),
+                "trust_level": tl,
+            })
+
+        # Recent timeline events (last 7 days)
+        recent_events: List[Dict[str, Any]] = []
+        if timeline:
+            from datetime import timedelta, timezone
+            week_ago = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=7)
+            for e in timeline.events():
+                occurred = e.occurred_at
+                if isinstance(occurred, str):
+                    occurred = datetime.fromisoformat(occurred)
+                if hasattr(occurred, "tzinfo"):
+                    occurred = occurred.replace(tzinfo=None)
+                if occurred >= week_ago:
+                    recent_events.append({
+                        "id": e.id,
+                        "title": e.title,
+                        "event_type": e.event_type.value if hasattr(e.event_type, "value") else str(e.event_type),
+                        "significance": e.significance,
+                        "occurred_at": occurred.isoformat() if hasattr(occurred, "isoformat") else str(occurred),
+                    })
+
+        return {
+            "goals": [self._goal_to_dict(g) for g in active_goals],
+            "intentions_by_author": by_author,
+            "total_active_intentions": len(active_intentions),
+            "upcoming_meetings": upcoming,
+            "relationships": rel_summary,
+            "recent_events": recent_events[-10:],
+        }
+
+    def digest(
+        self,
+        period: str = "daily",
+    ) -> Dict[str, Any]:
+        """
+        Generate a formatted digest of identity activity.
+
+        Args:
+            period: "daily" or "weekly"
+
+        Returns:
+            Dict with sections: summary, goals, intentions, meetings,
+                                timeline, relationships, evidence_highlights
+        """
+        from datetime import timedelta, timezone, datetime
+
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
+        if period == "weekly":
+            cutoff = now - timedelta(days=7)
+            period_label = "Weekly"
+        else:
+            cutoff = now - timedelta(days=1)
+            period_label = "Daily"
+
+        status = self.team_status()
+        timeline = self._runtime.timeline_registry.get(self._identity_id)
+
+        # Filter events since cutoff
+        digest_events: List[Dict[str, Any]] = []
+        if timeline:
+            for e in timeline.events():
+                occurred = e.occurred_at
+                if isinstance(occurred, str):
+                    occurred = datetime.fromisoformat(occurred)
+                if hasattr(occurred, "tzinfo"):
+                    occurred = occurred.replace(tzinfo=None)
+                if occurred >= cutoff:
+                    digest_events.append({
+                        "id": e.id,
+                        "title": e.title,
+                        "event_type": e.event_type.value if hasattr(e.event_type, "value") else str(e.event_type),
+                        "significance": e.significance,
+                        "occurred_at": occurred.isoformat() if hasattr(occurred, "isoformat") else str(occurred),
+                    })
+
+        # Count completed goals and intentions
+        completed_count = 0
+        all_goals = self._runtime.goal_engine.all()
+        for g in all_goals:
+            if hasattr(g, "completed_at") and g.completed_at:
+                completed_at = g.completed_at
+                if isinstance(completed_at, str):
+                    completed_at = datetime.fromisoformat(completed_at)
+                if hasattr(completed_at, "tzinfo"):
+                    completed_at = completed_at.replace(tzinfo=None)
+                if completed_at >= cutoff:
+                    completed_count += 1
+
+        # Relationship changes
+        rel_changes: List[Dict[str, Any]] = []
+        for r in status.get("relationships", []):
+            if r.get("trust_level", 0) >= 3:
+                rel_changes.append(r)
+
+        # Pending reminders
+        pending = self.reminders(max_results=10)
+
+        digest = {
+            "period": period,
+            "label": f"{period_label} Digest",
+            "generated_at": now.isoformat(),
+            "summary": {
+                "active_goals": len(status.get("goals", [])),
+                "active_intentions": status.get("total_active_intentions", 0),
+                "completed_items": completed_count,
+                "pending_reminders": len(pending),
+                "recent_events": len(digest_events),
+                "relationships": len(status.get("relationships", [])),
+            },
+            "goals": status.get("goals", []),
+            "intentions": status.get("intentions_by_author", {}),
+            "pending_reminders": pending,
+            "upcoming_meetings": status.get("upcoming_meetings", []),
+            "recent_timeline_events": digest_events,
+            "relationship_highlights": rel_changes,
+        }
+
+        return digest
 
     # ═══════════════════════════════════════════════════════════════════
     # Introspection

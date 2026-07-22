@@ -1,0 +1,4 @@
+discord.py>=2.3.0
+python-dotenv>=1.0.0
+identityos>=1.0.0
+# ^ Currently installed from repo root, but listed to document the dependency
