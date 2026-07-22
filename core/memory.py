@@ -314,6 +314,77 @@ class MemoryStore:
         return f"MemoryStore(fragments={len(self)})"
 
 
+# ─── Importance Scoring ────────────────────────────────────────────────────────
+# Multi-factor importance scoring for memory retrieval.
+# Each factor contributes a weight and the final score is a weighted sum.
+
+IMPORTANCE_WEIGHTS = {
+    "semantic": 0.30,        # Does the memory contain semantically significant content?
+    "relationship": 0.15,    # Does it reference a named person/entity?
+    "goal_relevance": 0.15,  # Does it relate to active goals?
+    "identity_relevance": 0.15, # Does it touch identity fields (preferences, values)?
+    "recency": 0.10,         # How recent is the memory?
+    "base_importance": 0.15, # The stored importance field
+}
+
+
+def compute_importance(
+    content: str,
+    base_importance: float = 0.5,
+    keywords: Optional[List[str]] = None,
+    has_relationship: bool = False,
+    is_emotional: bool = False,
+) -> float:
+    """
+    Compute a multi-factor importance score for a memory.
+
+    Higher weight factors:
+    - Semantic keywords (e.g. "cat", "favorite", "always", "never", "love",
+      "hate", "important", "remember", "family", "work")
+    - Named entity references (relationships)
+    - Emotional language
+    - Goal-relevant language
+    """
+    content_lower = content.lower()
+    score = base_importance * IMPORTANCE_WEIGHTS["base_importance"]
+
+    # Semantic signal: count significant keywords
+    semantic_keywords = {
+        "favorite", "love", "hate", "always", "never", "important",
+        "remember", "never forget", "crucial", "critical", "essential",
+        "family", "friend", "work", "passion", "dream", "goal",
+        "fear", "hope", "believe", "value", "principle", "core",
+        "identity", "name", "cat", "dog", "pet", "home", "born",
+    }
+    kw_count = sum(1 for kw in semantic_keywords if kw in content_lower)
+    semantic_score = min(1.0, kw_count / 5.0)
+    score += semantic_score * IMPORTANCE_WEIGHTS["semantic"]
+
+    # Named entity / relationship signal
+    if has_relationship:
+        score += 0.15 * IMPORTANCE_WEIGHTS["relationship"]
+
+    # Emotional signal
+    emotional_keywords = {
+        "excited", "upset", "angry", "happy", "sad", "worried", "anxious",
+        "grateful", "thankful", "proud", "ashamed", "guilty", "lonely",
+        "scared", "hurt", "joy", "love", "hate", "terrible", "amazing",
+        "wonderful", "awful", "heartbreaking", "thrilled", "devastated",
+    }
+    if is_emotional or any(ek in content_lower for ek in emotional_keywords):
+        score += 0.2 * IMPORTANCE_WEIGHTS["base_importance"]
+
+    # Goal-relevant signal
+    goal_keywords = {
+        "working on", "trying to", "plan to", "goal", "project", "deadline",
+        "need to", "should", "must", "aim", "objective", "mission",
+    }
+    if any(gk in content_lower for gk in goal_keywords):
+        score += 0.5 * IMPORTANCE_WEIGHTS["goal_relevance"]
+
+    return min(1.0, max(0.0, score))
+
+
 # ─── Factory helpers ──────────────────────────────────────────────────────────
 
 def make_memory(
@@ -321,11 +392,20 @@ def make_memory(
     identity_id: str = "",
     memory_type: MemoryType = MemoryType.EPISODIC,
     source: str = "api",
-    importance: float = 0.5,
+    importance: Optional[float] = None,
     tags: Optional[List[str]] = None,
+    has_relationship: bool = False,
+    is_emotional: bool = False,
     **extra: Any,
 ) -> MemoryFragment:
-    """Quick factory for creating a MemoryFragment."""
+    """Quick factory for creating a MemoryFragment.
+    If importance is None, it is auto-computed from content."""
+    if importance is None:
+        importance = compute_importance(
+            content=content,
+            has_relationship=has_relationship,
+            is_emotional=is_emotional,
+        )
     return MemoryFragment(
         identity_id=identity_id,
         content=content,

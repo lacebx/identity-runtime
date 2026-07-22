@@ -251,12 +251,32 @@ def compute_relevance(memory_type: str) -> float:
     return scores.get(memory_type, 1.0)
 
 
+_QUESTION_START = re.compile(r"^(what|why|how|when|where|who|which|does|is|are|can|could|will|would|do|did|have|has)", re.IGNORECASE)
+
+_ABOUT_ASSISTANT = re.compile(
+    r"(your\s+(?:favorite|name|personality|identity|belief|preference|trait|color|style)"
+    r"|you\s+(?:are|were|like|prefer|love|hate|enjoy|think|have|had|said|know)"
+    r"|actually\s+(?:your|you)"
+    r"|no[.,]\s+(?:your|you)"
+    r"|but\s+(?:your|you)"
+    r"|wait\s+(?:your|you)"
+    r"|i\s+(?:think|thought|believe|feel)\s+(?:your|you))",
+    re.IGNORECASE,
+)
+
+
 def is_worth_remembering(message: str, response: str) -> bool:
     """Quick pre-filter: is this exchange even worth evaluating?"""
     if len(message) < 15:
         return False
     simple_acks = {"ok", "okay", "thanks", "thank you", "got it", "sure", "yes", "no", "great"}
     if message.lower().strip() in simple_acks:
+        return False
+    # Skip questions — the user is asking, not disclosing
+    if message.strip().endswith("?") or _QUESTION_START.match(message.strip()):
+        return False
+    # Skip user corrections / assertions about the assistant's identity
+    if _ABOUT_ASSISTANT.search(message):
         return False
     return True
 
